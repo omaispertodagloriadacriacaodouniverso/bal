@@ -45,6 +45,11 @@ typedef struct {
     ASTNode** tests;
     int test_count;
     int in_test;
+    int in_global;
+    char** global_init;
+    int global_init_count;
+    char** global_names;
+    int global_names_count;
 } CodeGen;
 
 static void cg_init(CodeGen* cg) {
@@ -67,6 +72,11 @@ static void cg_init(CodeGen* cg) {
     cg->tests = malloc(64 * sizeof(ASTNode*));
     cg->test_count = 0;
     cg->in_test = 0;
+    cg->in_global = 0;
+    cg->global_init = malloc(256 * sizeof(char*));
+    cg->global_init_count = 0;
+    cg->global_names = malloc(256 * sizeof(char*));
+    cg->global_names_count = 0;
 }
 
 static void cg_emit(CodeGen* cg, const char* code) {
@@ -112,6 +122,54 @@ static ASTNode* find_struct(CodeGen* cg, const char* name) {
 /* ── Forward declarations ── */
 static char* gen_expr(CodeGen* cg, ASTNode* node);
 
+static int expr_is_str(CodeGen* cg, ASTNode* n) {
+    if (!n) return 0;
+    if (n->type == NODE_STR) return 1;
+    if (n->type == NODE_CALL && n->left && n->left->type == NODE_IDENT) {
+        const char* rt = func_return_type(cg, n->left->value);
+        if (rt && (strcmp(rt, "str") == 0 || strcmp(rt, "str?") == 0)) return 1;
+        const char* fn = n->left->value;
+        if (strcmp(fn, "read_file") == 0 || strcmp(fn, "str_concat") == 0 ||
+            strcmp(fn, "str_slice") == 0 || strcmp(fn, "str_trim") == 0) return 1;
+    }
+    if (n->type == NODE_BINOP && n->value && strcmp(n->value, "+") == 0)
+        return expr_is_str(cg, n->left) || expr_is_str(cg, n->right);
+    return 0;
+}
+
+static void collect_lets(CodeGen* cg, ASTNode* node, char names[][256], ASTNode* nodes[], int* count, int max) {
+    if (!node) return;
+    if (node->type == NODE_LET && node->value && node->child_count >= 1 && node->children[0]->type != NODE_INDEX) {
+        int found = 0;
+        for (int i = 0; i < *count; i++) if (strcmp(names[i], node->value) == 0) { found = 1; break; }
+        if (!found && *count < max) {
+            strncpy(names[*count], node->value, 255);
+            nodes[*count] = node;
+            (*count)++;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) collect_lets(cg, node->children[i], names, nodes, count, max);
+    if (node->left) collect_lets(cg, node->left, names, nodes, count, max);
+    if (node->right) collect_lets(cg, node->right, names, nodes, count, max);
+}
+
+static const char* infer_ctype(CodeGen* cg, ASTNode* e) {
+    if (!e) return "int";
+    if (e->type == NODE_STR) return "const char*";
+    if (e->type == NODE_FLOAT) return "double";
+    if (e->type == NODE_INT) return "int";
+    if (e->type == NODE_CALL && e->left && e->left->type == NODE_IDENT) {
+        const char* fn = e->left->value;
+        if (is_struct_name(cg, fn)) return fn;
+        const char* rt = func_return_type(cg, fn);
+        if (rt) return ctype_of(rt);
+        if (strcmp(fn, "read_file") == 0 || strcmp(fn, "str_concat") == 0 ||
+            strcmp(fn, "str_slice") == 0 || strcmp(fn, "str_trim") == 0) return "const char*";
+    }
+    if (e->type == NODE_ARRAY) return "BalArray";
+    return "int";
+}
+
 /* ── gen_stmt ── */
 static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
     if (!stmt) return;
@@ -138,18 +196,46 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
             snprintf(name, sizeof(name), "%s", stmt->value);
             /* Track as array var */
             cg->array_vars[cg->array_count++] = strdup(name);
-            /* Generate malloc + init */
             char buf[4096];
+            int hoisted = 0;
+            for (int d = 0; d < cg->declared_count; d++)
+                if (strcmp(cg->declared_vars[d], name) == 0) { hoisted = 1; break; }
+            if (cg->in_global) {
+                snprintf(buf, sizeof(buf), "int* _%s_data;", name);
+                cg_emit(cg, buf);
+                snprintf(buf, sizeof(buf), "BalArray %s;", name);
+                cg_emit(cg, buf);
+                char g[4096];
+                snprintf(g, sizeof(g), "_%s_data = malloc(%d * sizeof(int));", name, arr->child_count);
+                cg->global_init[cg->global_init_count++] = strdup(g);
+            } else if (hoisted) {
+            snprintf(buf, sizeof(buf), "_%s_data = malloc(%d * sizeof(int));", name, arr->child_count);
+            cg_emit(cg, buf);
+            } else {
             snprintf(buf, sizeof(buf), "int* _%s_data = malloc(%d * sizeof(int));", name, arr->child_count);
             cg_emit(cg, buf);
+            }
             for (int i = 0; i < arr->child_count; i++) {
                 char* val = gen_expr(cg, arr->children[i]);
-                snprintf(buf, sizeof(buf), "_%s_data[%d] = %s;", name, i, val);
-                cg_emit(cg, buf);
+                if (cg->in_global) {
+                    snprintf(buf, sizeof(buf), "_%s_data[%d] = %s;", name, i, val);
+                    cg->global_init[cg->global_init_count++] = strdup(buf);
+                } else {
+                    snprintf(buf, sizeof(buf), "_%s_data[%d] = %s;", name, i, val);
+                    cg_emit(cg, buf);
+                }
                 free(val);
             }
-            snprintf(buf, sizeof(buf), "BalArray %s = bal_array_new(_%s_data, %d);", name, name, arr->child_count);
-            cg_emit(cg, buf);
+            if (cg->in_global) {
+                snprintf(buf, sizeof(buf), "%s = bal_array_new(_%s_data, %d);", name, name, arr->child_count);
+                cg->global_init[cg->global_init_count++] = strdup(buf);
+            } else if (hoisted) {
+                snprintf(buf, sizeof(buf), "%s = bal_array_new(_%s_data, %d);", name, name, arr->child_count);
+                cg_emit(cg, buf);
+            } else {
+                snprintf(buf, sizeof(buf), "BalArray %s = bal_array_new(_%s_data, %d);", name, name, arr->child_count);
+                cg_emit(cg, buf);
+            }
             return;
         }
 
@@ -445,11 +531,7 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                 return res;
             }
             if (strcmp(node->value, "+") == 0) {
-                /* String concat only if either side is a string literal or str variable */
-                int is_str = 0;
-                if (node->left->type == NODE_STR) is_str = 1;
-                if (node->right->type == NODE_STR) is_str = 1;
-                /* Check if left/right are idents that are str type (simplified: check if value is a known string var) */
+                int is_str = expr_is_str(cg, node->left) || expr_is_str(cg, node->right);
                 if (is_str) {
                     snprintf(buf, sizeof(buf), "str_concat(%s, %s)", left, right);
                 } else {
@@ -541,6 +623,13 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                 char* idx = gen_expr(cg, node->children[1]);
                 snprintf(buf, sizeof(buf), "(int)(unsigned char)(%s)[%s]", arg, idx);
                 free(func); free(arg); free(idx);
+                return strdup(buf);
+            }
+            if (strcmp(func, "str_eq") == 0) {
+                char* arg = gen_expr(cg, node->children[0]);
+                char* arg2 = gen_expr(cg, node->children[1]);
+                snprintf(buf, sizeof(buf), "str_eq(%s, %s)", arg, arg2);
+                free(func); free(arg); free(arg2);
                 return strdup(buf);
             }
             if (strcmp(func, "str_len") == 0) {
@@ -656,12 +745,37 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
     cg_emit(cg, "static char* str_trim(const char* s) { while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r') s++; size_t len = strlen(s); while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\\t' || s[len-1] == '\\n' || s[len-1] == '\\r')) len--; char* r = malloc(len + 1); memcpy(r, s, len); r[len] = 0; return r; }");
     cg_emit(cg, "static int str_contains(const char* s, const char* sub) { return strstr(s, sub) != NULL; }");
     cg_emit(cg, "static int str_count(const char* s, const char* sub) { int count = 0; const char* p = s; size_t sublen = strlen(sub); if (sublen == 0) return 0; while ((p = strstr(p, sub)) != NULL) { count++; p += sublen; } return count; }");
+    cg_emit(cg, "static int str_eq(const char* a, const char* b) { return strcmp(a, b) == 0; }");
     cg_emit(cg, "typedef struct { char* pool; size_t used; size_t cap; } Arena;");
     cg_emit(cg, "static Arena arena_new(size_t cap) { Arena a; a.pool = malloc(cap); a.used = 0; a.cap = cap; return a; }");
     cg_emit(cg, "static void* arena_alloc(Arena* a, size_t size) { if (a->used + size > a->cap) return NULL; void* p = a->pool + a->used; a->used += size; return p; }");
     cg_emit(cg, "static void arena_free(Arena* a) { free(a->pool); a->used = 0; a->cap = 0; }");
     cg_emit(cg, "#define bal_assert(c) do { if (!(c)) { fprintf(stderr, \"assert failed: %s:%d\\n\", __FILE__, __LINE__); exit(1); } } while (0)");
     cg_emit(cg, "#define bal_tassert(c) do { if (!(c)) { fprintf(stderr, \"assert failed: %s:%d\\n\", __FILE__, __LINE__); return 1; } } while (0)");
+    cg_emit(cg, "");
+
+    /* Top-level statements -> C globals */
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        if (c->type != NODE_STRUCT && c->type != NODE_FUNC && c->type != NODE_TEST) {
+            cg->indent = 0;
+            cg->declared_count = 0;
+            cg->in_global = 1;
+            if (c->type == NODE_LET && c->value)
+                cg->global_names[cg->global_names_count++] = strdup(c->value);
+            gen_stmt(cg, c);
+            cg->in_global = 0;
+        }
+    }
+    cg_emit(cg, "");
+    if (cg->global_init_count > 0) {
+        cg_emit(cg, "static void bal_init_globals(void) {");
+        cg->indent++;
+        for (int i = 0; i < cg->global_init_count; i++) cg_emit(cg, cg->global_init[i]);
+        cg->indent--;
+        cg_emit(cg, "}");
+        cg_emit(cg, "");
+    }
     cg_emit(cg, "");
 
     /* Emit structs */
@@ -756,6 +870,34 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
             cg_emit(cg, buf);
             cg->indent++;
             cg->declared_count = 0; /* reset per function */
+            for (int g = 0; g < cg->global_names_count; g++)
+                cg->declared_vars[cg->declared_count++] = strdup(cg->global_names[g]);
+            if (strcmp(f->value, "main") == 0 && cg->global_init_count > 0)
+                cg_emit(cg, "bal_init_globals();");
+            /* hoist let/var declarations to function top (C block scope) */
+            {
+                char names[128][256];
+                ASTNode* nodes[128];
+                int ncount = 0;
+                collect_lets(cg, f, names, nodes, &ncount, 128);
+                for (int ni = 0; ni < ncount; ni++) {
+                    int already = 0;
+                    for (int d = 0; d < cg->declared_count; d++)
+                        if (strcmp(cg->declared_vars[d], names[ni]) == 0) { already = 1; break; }
+                    if (already) continue;
+                    cg->declared_vars[cg->declared_count++] = strdup(names[ni]);
+                    ASTNode* ln = nodes[ni];
+                    char decl[512];
+                    if (ln->child_count >= 1 && ln->children[0]->type == NODE_ARRAY) {
+                        cg->array_vars[cg->array_count++] = strdup(names[ni]);
+                        snprintf(decl, sizeof(decl), "int* _%s_data; BalArray %s;", names[ni], names[ni]);
+                    } else {
+                        const char* tn = ln->type_name ? ln->type_name : infer_ctype(cg, ln->children[0]);
+                        snprintf(decl, sizeof(decl), "%s %s;", ctype_of(tn), names[ni]);
+                    }
+                    cg_emit(cg, decl);
+                }
+            }
 
             /* Find body (last child that is a BLOCK) */
             ASTNode* body = NULL;

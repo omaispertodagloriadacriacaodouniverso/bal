@@ -1,4 +1,4 @@
-# Real Sieve of Eratosthenes — O(n log log n)
+
 fn main():
     let n = 1000000
     var is_comp = [0]

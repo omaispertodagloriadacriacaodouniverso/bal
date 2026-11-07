@@ -41,6 +41,9 @@ class CodeGen:
         self.struct_vars = {}
         self.nullable_vars = set()
         self.in_test = False
+        self.in_global = False
+        self.global_init = []
+        self.global_names = set()
 
     def emit(self, code):
         self.lines.append("    " * self.indent + code)
@@ -58,6 +61,16 @@ class CodeGen:
                         self.functions.append(stmt)
                 elif isinstance(stmt, TestDef):
                     self.tests.append(stmt)
+                else:
+                    # top-level statement -> C global
+                    self.indent = 0
+                    self.in_global = True
+                    if isinstance(stmt, LetStmt):
+                        self.global_names.add(stmt.name)
+                        stmt.mutable = True  # globals must be assignable
+                    self.gen_stmt(stmt)
+                    self.in_global = False
+                    self.indent = 0
             self.lines.insert(0, "#include <stdio.h>")
             self.lines.insert(1, "#include <stdlib.h>")
             self.lines.insert(2, "#include <string.h>")
@@ -73,6 +86,7 @@ class CodeGen:
             self.lines.insert(12, "static char* str_trim(const char* s) { while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r') s++; size_t len = strlen(s); while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\\t' || s[len-1] == '\\n' || s[len-1] == '\\r')) len--; char* r = malloc(len + 1); memcpy(r, s, len); r[len] = 0; return r; }")
             self.lines.insert(13, "static int str_contains(const char* s, const char* sub) { return strstr(s, sub) != NULL; }")
             self.lines.insert(14, "static int str_count(const char* s, const char* sub) { int count = 0; const char* p = s; size_t sublen = strlen(sub); if (sublen == 0) return 0; while ((p = strstr(p, sub)) != NULL) { count++; p += sublen; } return count; }")
+            self.lines.insert(15, "static int str_eq(const char* a, const char* b) { return strcmp(a, b) == 0; }")
             # Arena allocator
             self.lines.insert(15, "typedef struct { char* pool; size_t used; size_t cap; } Arena;")
             self.lines.insert(16, "static Arena arena_new(size_t cap) { Arena a; a.pool = malloc(cap); a.used = 0; a.cap = cap; return a; }")
@@ -89,6 +103,14 @@ class CodeGen:
             self.lines.append("")
             for e in self.externs:
                 self.gen_extern(e)
+            if self.global_init:
+                self.lines.append("static void bal_init_globals(void) {")
+                self.indent += 1
+                for g in self.global_init:
+                    self.emit(g + ";")
+                self.indent -= 1
+                self.lines.append("}")
+                self.lines.append("")
             for f in self.functions:
                 self.gen_func(f)
             if self.tests:
@@ -163,9 +185,23 @@ class CodeGen:
         # and re-declaring with a fixed signature conflicts (e.g. printf varargs).
         return
 
+    def _collect_lets(self, stmts, acc):
+        for s in stmts:
+            if isinstance(s, LetStmt) and s.name not in acc:
+                acc[s.name] = s
+            for attr in ("body", "elifs", "else_body"):
+                sub = getattr(s, attr, None)
+                if isinstance(sub, list):
+                    if attr == "elifs":
+                        for c, b in sub:
+                            self._collect_lets([c], acc)
+                            self._collect_lets(b, acc)
+                    else:
+                        self._collect_lets(sub, acc)
+
     def gen_func(self, node):
-        self.declared_vars = set()
-        self.array_vars = set()
+        self.declared_vars = set(self.global_names)
+        # array_vars persists: global arrays must stay visible inside functions
         self.struct_vars = {}
         self.nullable_vars = set()
         fname = "bal_user_main" if (node.name == "main" and self.tests) else node.name
@@ -178,6 +214,24 @@ class CodeGen:
         self.lines.append("")
         self.lines.append(f"{ret} {fname}({params}) {{")
         self.indent += 1
+        if node.name == "main" and self.global_init:
+            self.emit("bal_init_globals();")
+        # hoist all let/var declarations to the top of the function (C block scope)
+        decls = {}
+        self._collect_lets(node.body, decls)
+        for name, s in decls.items():
+            if name in self.declared_vars:
+                continue
+            self.declared_vars.add(name)
+            if isinstance(s.expr, tuple) and s.expr[0] == "list":
+                self.array_vars.add(name)
+                self.emit(f"int* _{name}_data;")
+                self.emit(f"BalArray {name};")
+                continue
+            ctype = ctype_of(s.type) if s.type else self.infer_type(s.expr)
+            if s.type and s.type.endswith("?"):
+                self.nullable_vars.add(name)
+            self.emit(f"{ctype} {name};")
         for stmt in node.body:
             self.gen_stmt(stmt)
         if node.name == "main":
@@ -195,6 +249,21 @@ class CodeGen:
                 arr_name = stmt.name
                 self.array_vars.add(arr_name)
                 self.declared_vars.add(arr_name)
+                if self.in_global:
+                    self.emit(f"int* _{arr_name}_data;")
+                    self.emit(f"BalArray {arr_name};")
+                    self.global_init.append(f"_{arr_name}_data = malloc({len(elems)} * sizeof(int));")
+                    for i, e in enumerate(elems):
+                        self.global_init.append(f"_{arr_name}_data[{i}] = {self.gen_expr(e)};")
+                    self.global_init.append(f"{arr_name} = bal_array_new(_{arr_name}_data, {len(elems)});")
+                    return
+                if arr_name in self.declared_vars:
+                    # hoisted to function top: emit assignments only
+                    self.emit(f"_{arr_name}_data = malloc({len(elems)} * sizeof(int));")
+                    for i, e in enumerate(elems):
+                        self.emit(f"_{arr_name}_data[{i}] = {self.gen_expr(e)};")
+                    self.emit(f"{arr_name} = bal_array_new(_{arr_name}_data, {len(elems)});")
+                    return
                 self.emit(f"int* _{arr_name}_data = malloc({len(elems)} * sizeof(int));")
                 for i, e in enumerate(elems):
                     self.emit(f"_{arr_name}_data[{i}] = {self.gen_expr(e)};")
@@ -426,6 +495,8 @@ class CodeGen:
                 return f"str_trim({args})"
             if func == "str_contains":
                 return f"str_contains({args})"
+            if func == "str_eq":
+                return f"(strcmp({args}) == 0)"
             if func == "str_count":
                 return f"str_count({args})"
             if func == "str_len":
