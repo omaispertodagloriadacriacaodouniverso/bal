@@ -89,9 +89,42 @@ def format_line(code):
             continue
         res.append(ch)
     code = "".join(res)
-    code = re.sub(r",(?=\S)", ", ", code)  # space after comma (outside strings is rare; ok)
+    # space after comma — string-aware (don't touch commas inside string literals)
+    code = _space_after_comma(code)
     code = code.replace("( ", "(").replace(" )", ")")
     return code.rstrip()
+
+
+def _space_after_comma(code: str) -> str:
+    """Add space after commas, but only outside string literals."""
+    out = []
+    in_str = None
+    i = 0
+    while i < len(code):
+        ch = code[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\":
+                if i + 1 < len(code):
+                    out.append(code[i + 1])
+                    i += 2
+                    continue
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "," and i + 1 < len(code) and code[i + 1] != " ":
+            out.append(", ")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def format_source(source):
