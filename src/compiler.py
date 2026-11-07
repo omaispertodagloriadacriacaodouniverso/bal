@@ -178,8 +178,10 @@ class CodeGen:
                         self._collect_lets(sub, acc)
 
     def gen_func(self, node):
+        # Reset per-function scope. Keep only global arrays visible (they're declared at file scope).
+        global_arrays = {n for n in self.array_vars if n in self.global_names}
         self.declared_vars = set(self.global_names)
-        # array_vars persists: global arrays must stay visible inside functions
+        self.array_vars = global_arrays  # FIX: was persisting local arrays between functions
         self.struct_vars = {}
         self.nullable_vars = set()
         fname = "bal_user_main" if (node.name == "main" and self.tests) else node.name
