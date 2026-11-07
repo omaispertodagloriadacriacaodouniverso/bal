@@ -49,9 +49,8 @@ class Lexer:
 
     def tokenize(self):
         for line_num, line in enumerate(self.lines, 1):
-            # Strip inline comments
-            if "#" in line:
-                line = line[:line.index("#")]
+            # Strip inline comments (string-aware: ignore # inside quotes)
+            line = self._strip_comment(line)
             stripped = line.rstrip()
             if not stripped:
                 self.tokens.append(Token(TT_NEWLINE, "\n", line_num, 0))
@@ -77,6 +76,28 @@ class Lexer:
 
         self.tokens.append(Token(TT_EOF, None, len(self.lines), 0))
         return self.tokens
+
+    @staticmethod
+    def _strip_comment(line: str) -> str:
+        """Remove inline # comments, but only outside string literals."""
+        in_str = False
+        quote_char = ""
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if in_str:
+                if c == "\\":
+                    i += 2  # skip escaped char
+                    continue
+                if c == quote_char:
+                    in_str = False
+            elif c in ('"', "'"):
+                in_str = True
+                quote_char = c
+            elif c == "#":
+                return line[:i]
+            i += 1
+        return line
 
     def _tokenize_line(self, text, line_num, base_col):
         i = 0

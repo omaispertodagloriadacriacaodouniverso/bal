@@ -63,10 +63,18 @@ def test_compile_and_run():
         os.unlink(c_path)
 
 def test_string_with_hash():
-    """String with # should not be treated as comment (KNOWN LEXER BUG - not fixed yet)."""
-    # This test documents a known bug: lexer.py cuts # inside strings
-    # TODO: fix lexer to be string-aware when stripping comments
-    pass
+    """String with # should not be treated as comment (lexer bug FIXED)."""
+    from lexer import tokenize
+    src = 'print("#hello")\n'
+    toks = tokenize(src)
+    has_hash = any(isinstance(t.value, str) and "#hello" in t.value for t in toks)
+    check("hash in string preserved", has_hash)
+
+    # Comment outside string should still strip
+    src2 = "print(1) # comment\n"
+    toks2 = tokenize(src2)
+    no_comment = not any(isinstance(t.value, str) and "comment" in t.value for t in toks2)
+    check("comment outside string stripped", no_comment)
 
 if __name__ == "__main__":
     test_codegen_basic()
