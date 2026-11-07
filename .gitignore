@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+balc/balc
+*.balc.c
+*.balc.bin
+*.balc.err
