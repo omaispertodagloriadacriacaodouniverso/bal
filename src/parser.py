@@ -1,134 +1,134 @@
 #!/usr/bin/env python3
-"""bal compiler — transpiles bal source to C and compiles it."""
+"""bal parser — converts token stream to AST."""
 
 import sys
 import os
-import subprocess
-import tempfile
+from dataclasses import dataclass, field
+from typing import Optional
 
 # Import lexer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from lexer import tokenize, TT_EOF, TT_INDENT, TT_DEDENT, TT_NEWLINE, TT_INT, TT_FLOAT, TT_STR, TT_IDENT, TT_KEYWORD, TT_OP, TT_COLON, TT_COMMA, TT_DOT, TT_QUESTION, TT_LPAREN, TT_RPAREN, TT_LBRACKET, TT_RBRACKET, TT_ARROW
 
-# ── AST Nodes ──
+# ── AST Nodes (dataclasses — much less boilerplate than manual __init__) ──
 
+@dataclass
 class Program:
-    def __init__(self, stmts):
-        self.stmts = stmts
+    stmts: list
 
+@dataclass
 class FuncDef:
-    def __init__(self, name, params, ret_type, body):
-        self.name = name
-        self.params = params  # [(name, type)]
-        self.ret_type = ret_type
-        self.body = body
+    name: str
+    params: list  # [(name, type)]
+    ret_type: str
+    body: list
 
+@dataclass
 class Param:
-    def __init__(self, name, type_):
-        self.name = name
-        self.type = type_
+    name: str
+    type: str
 
+@dataclass
 class StructDef:
-    def __init__(self, name, fields):
-        self.name = name
-        self.fields = fields  # [(name, type)]
+    name: str
+    fields: list  # [(name, type)]
 
+@dataclass
 class LetStmt:
-    def __init__(self, name, type_, expr, mutable=False):
-        self.name = name
-        self.type = type_
-        self.expr = expr
-        self.mutable = mutable
+    name: str
+    type: Optional[str]
+    expr: object
+    mutable: bool = False
 
+@dataclass
 class ReturnStmt:
-    def __init__(self, expr):
-        self.expr = expr
+    expr: Optional[object]
 
+@dataclass
 class IfStmt:
-    def __init__(self, cond, body, elifs=None, else_body=None):
-        self.cond = cond
-        self.body = body
-        self.elifs = elifs or []
-        self.else_body = else_body
+    cond: object
+    body: list
+    elifs: list = field(default_factory=list)
+    else_body: Optional[list] = None
 
+@dataclass
 class WhileStmt:
-    def __init__(self, cond, body):
-        self.cond = cond
-        self.body = body
+    cond: object
+    body: list
 
+@dataclass
 class ForStmt:
-    def __init__(self, var, iterable, body):
-        self.var = var
-        self.iterable = iterable
-        self.body = body
+    var: str
+    iterable: object
+    body: list
 
+@dataclass
 class ExprStmt:
-    def __init__(self, expr):
-        self.expr = expr
+    expr: object
 
+@dataclass
 class PrintStmt:
-    def __init__(self, expr):
-        self.expr = expr
+    expr: object
 
+@dataclass
 class BinOp:
-    def __init__(self, left, op, right):
-        self.left = left
-        self.op = op
-        self.right = right
+    left: object
+    op: str
+    right: object
 
+@dataclass
 class UnaryOp:
-    def __init__(self, op, expr):
-        self.op = op
-        self.expr = expr
+    op: str
+    expr: object
 
+@dataclass
 class Call:
-    def __init__(self, func, args):
-        self.func = func
-        self.args = args
+    func: object
+    args: list
 
+@dataclass
 class Ident:
-    def __init__(self, name):
-        self.name = name
+    name: str
 
+@dataclass
 class IntLit:
-    def __init__(self, value):
-        self.value = value
+    value: int
 
+@dataclass
 class FloatLit:
-    def __init__(self, value):
-        self.value = value
+    value: float
 
+@dataclass
 class StrLit:
-    def __init__(self, value):
-        self.value = value
+    value: str
 
+@dataclass
 class BoolLit:
-    def __init__(self, value):
-        self.value = value
+    value: bool
 
+@dataclass
 class Index:
-    def __init__(self, obj, idx):
-        self.obj = obj
-        self.idx = idx
+    obj: object
+    idx: object
 
+@dataclass
 class Attr:
-    def __init__(self, obj, field):
-        self.obj = obj
-        self.field = field
+    obj: object
+    field: str
 
+@dataclass
 class TestDef:
-    def __init__(self, name, body):
-        self.name = name
-        self.body = body
+    name: str
+    body: list
 
+@dataclass
 class AssertStmt:
-    def __init__(self, expr):
-        self.expr = expr
+    expr: object
 
+@dataclass
 class AssignStmt:
-    def __init__(self, target, expr):
-        self.target = target
-        self.expr = expr
+    target: object
+    expr: object
 
 # ── Parser ──
 
