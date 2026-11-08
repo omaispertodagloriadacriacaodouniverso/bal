@@ -126,9 +126,6 @@ class CodeGen:
         self.indent -= 1
         self.lines.append("}")
 
-    def gen_struct_decl(self, node):
-        pass
-
     def gen_struct(self, node):
         self.lines.append(f"typedef struct {{")
         self.indent += 1
