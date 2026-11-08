@@ -2,11 +2,10 @@
 """bal formatter — uses lexer INDENT/DEDENT tokens for correct block depth,
 normalizes spacing around operators, strips trailing whitespace."""
 
-import re
 import sys
+import os
 
-sys.path.insert(0, __import__("os").path.dirname(__file__))
-from lexer import tokenize, TT_INDENT, TT_DEDENT, TT_NEWLINE  # noqa: E402
+sys.path.insert(0, os.path.dirname(__file__))
 
 # longest first so '->' isn't split into '- >'
 BINOPS = ["==", "!=", "<=", ">=", "->", "+", "-", "*", "/", "%", "<", ">", "="]
@@ -39,16 +38,21 @@ def _split_code_comment(line):
 
 
 def format_line(code):
+    """Normalize spacing in one string-aware pass: binops, space runs, commas."""
     if not code:
         return ""
-    # spaces around binary ops (outside strings)
     out = []
     in_str = None
     i = 0
-    while i < len(code):
+    n = len(code)
+    while i < n:
         ch = code[i]
         if in_str:
             out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(code[i + 1])
+                i += 2
+                continue
             if ch == in_str:
                 in_str = None
             i += 1
@@ -58,73 +62,27 @@ def format_line(code):
             out.append(ch)
             i += 1
             continue
-        matched = False
-        for op in BINOPS:
-            if code.startswith(op, i):
-                out.append(f" {op} ")
-                i += len(op)
-                matched = True
-                break
+        # binary operators (longest first so '->' isn't split)
+        matched = next((op for op in BINOPS if code.startswith(op, i)), None)
         if matched:
-            continue
-        out.append(ch)
-        i += 1
-    code = "".join(out)
-    # collapse runs of spaces outside strings; keep one space between tokens
-    res = []
-    in_str = None
-    for ch in code:
-        if in_str:
-            res.append(ch)
-            if ch == in_str:
-                in_str = None
-            continue
-        if ch in ('"', "'"):
-            in_str = ch
-            res.append(ch)
+            out.append(f" {matched} ")
+            i += len(matched)
             continue
         if ch == " ":
-            if res and res[-1] not in (" ", "("):
-                res.append(" ")
-            continue
-        res.append(ch)
-    code = "".join(res)
-    # space after comma — string-aware (don't touch commas inside string literals)
-    code = _space_after_comma(code)
-    code = code.replace("( ", "(").replace(" )", ")")
-    return code.rstrip()
-
-
-def _space_after_comma(code: str) -> str:
-    """Add space after commas, but only outside string literals."""
-    out = []
-    in_str = None
-    i = 0
-    while i < len(code):
-        ch = code[i]
-        if in_str:
-            out.append(ch)
-            if ch == "\\":
-                if i + 1 < len(code):
-                    out.append(code[i + 1])
-                    i += 2
-                    continue
-            elif ch == in_str:
-                in_str = None
+            # collapse runs; no space after '(' or before ')'
+            if out and out[-1] not in (" ", "("):
+                out.append(" ")
             i += 1
             continue
-        if ch in ('"', "'"):
-            in_str = ch
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "," and i + 1 < len(code) and code[i + 1] != " ":
+        if ch == "," and i + 1 < n and code[i + 1] != " ":
             out.append(", ")
             i += 1
             continue
         out.append(ch)
         i += 1
-    return "".join(out)
+    code = "".join(out)
+    code = code.replace("( ", "(").replace(" )", ")")
+    return code.rstrip()
 
 
 def format_source(source):
