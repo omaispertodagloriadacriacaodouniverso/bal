@@ -9,7 +9,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(__file__))
 from parser import (parse, Program, FuncDef, Param, StructDef, LetStmt, ReturnStmt,
     IfStmt, WhileStmt, ForStmt, ExprStmt, PrintStmt, BinOp, UnaryOp, Call,
-    Ident, IntLit, FloatLit, StrLit, BoolLit, Index, Attr, TestDef, AssertStmt, AssignStmt)
+    Ident, IntLit, FloatLit, StrLit, BoolLit, Index, Attr, TestDef, AssertStmt, AssignStmt, ListExpr)
 from prelude import prelude_lines
 from baltypes import ctype_of, infer_expr_type, BUILTIN_RETURN_TYPES
 
@@ -188,7 +188,7 @@ class CodeGen:
             if name in self.declared_vars:
                 continue
             self.declared_vars.add(name)
-            if isinstance(s.expr, tuple) and s.expr[0] == "list":
+            if isinstance(s.expr, ListExpr):
                 self.array_vars.add(name)
                 self.emit(f"int* _{name}_data;")
                 self.emit(f"BalArray {name};")
@@ -226,7 +226,7 @@ class CodeGen:
 
     def _gen_let(self, stmt):
         """Generate a let/variable declaration."""
-        if isinstance(stmt.expr, tuple) and stmt.expr[0] == "list":
+        if isinstance(stmt.expr, ListExpr):
             self._gen_array_let(stmt)
             return
 
@@ -252,7 +252,7 @@ class CodeGen:
 
     def _gen_array_let(self, stmt):
         """Generate an array literal declaration. Handles global, hoisted, and local cases."""
-        elems = stmt.expr[1]
+        elems = stmt.expr.elems
         arr_name = stmt.name
         self.array_vars.add(arr_name)
         self.declared_vars.add(arr_name)
@@ -487,7 +487,7 @@ class CodeGen:
         if isinstance(expr, Attr):
             obj = self.gen_expr(expr.obj)
             return f"{obj}.{expr.field}"
-        if isinstance(expr, tuple) and expr[0] == "list":
+        if isinstance(expr, ListExpr):
             return "/* list */"
         return "0"
 

@@ -130,6 +130,10 @@ class AssignStmt:
     target: object
     expr: object
 
+@dataclass
+class ListExpr:
+    elems: list
+
 # ── Parser ──
 
 class Parser:
@@ -499,7 +503,7 @@ class Parser:
                 if self.peek().type == TT_COMMA:
                     self.advance()
             self.expect(TT_RBRACKET)
-            return ("list", elems)
+            return ListExpr(elems)
         raise SyntaxError(f"Unexpected token {tok} at line {tok.line}")
 
 def parse(source):
