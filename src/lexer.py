@@ -28,6 +28,12 @@ KEYWORDS = {
     "test", "assert",
 }
 
+# Single-char punctuation -> token type
+PUNCT = {
+    ":": TT_COLON, ",": TT_COMMA, ".": TT_DOT, "?": TT_QUESTION,
+    "(": TT_LPAREN, ")": TT_RPAREN, "[": TT_LBRACKET, "]": TT_RBRACKET,
+}
+
 
 class Token:
     def __init__(self, type_, value, line, col):
@@ -102,26 +108,23 @@ class Lexer:
     def _tokenize_line(self, text, line_num, base_col):
         i = 0
         while i < len(text):
-            if text[i].isspace():
+            ch = text[i]
+            if ch.isspace():
                 i += 1
                 continue
 
-            if text[i] in ('"', "'"):
-                quote = text[i]
+            if ch in ('"', "'"):
+                quote = ch
                 j = i + 1
                 while j < len(text) and text[j] != quote:
-                    if text[j] == "\\" and j + 1 < len(text):
-                        j += 2
-                    else:
-                        j += 1
+                    j += 2 if text[j] == "\\" and j + 1 < len(text) else 1
                 raw = text[i + 1:j]
-                # Process escape sequences
                 val = raw.encode().decode("unicode_escape")
                 self.tokens.append(Token(TT_STR, val, line_num, base_col + i))
                 i = j + 1
                 continue
 
-            if text[i].isdigit() or (text[i] == "." and i + 1 < len(text) and text[i + 1].isdigit()):
+            if ch.isdigit() or (ch == "." and i + 1 < len(text) and text[i + 1].isdigit()):
                 j = i
                 is_float = False
                 while j < len(text) and (text[j].isdigit() or text[j] == "."):
@@ -129,10 +132,8 @@ class Lexer:
                         is_float = True
                     j += 1
                 val = text[i:j]
-                if is_float:
-                    self.tokens.append(Token(TT_FLOAT, float(val), line_num, base_col + i))
-                else:
-                    self.tokens.append(Token(TT_INT, int(val), line_num, base_col + i))
+                ttype = TT_FLOAT if is_float else TT_INT
+                self.tokens.append(Token(ttype, float(val) if is_float else int(val), line_num, base_col + i))
                 i = j
                 continue
 
@@ -141,66 +142,31 @@ class Lexer:
                 i += 2
                 continue
 
-            if text[i] in "+-*/%<>!=":
+            if ch in "+-*/%<>!=":
                 if i + 1 < len(text) and text[i + 1] == "=":
                     self.tokens.append(Token(TT_OP, text[i:i + 2], line_num, base_col + i))
                     i += 2
                 else:
-                    self.tokens.append(Token(TT_OP, text[i], line_num, base_col + i))
+                    self.tokens.append(Token(TT_OP, ch, line_num, base_col + i))
                     i += 1
                 continue
 
-            if text[i] == ":":
-                self.tokens.append(Token(TT_COLON, ":", line_num, base_col + i))
+            if ch in PUNCT:
+                self.tokens.append(Token(PUNCT[ch], ch, line_num, base_col + i))
                 i += 1
                 continue
 
-            if text[i] == ",":
-                self.tokens.append(Token(TT_COMMA, ",", line_num, base_col + i))
-                i += 1
-                continue
-
-            if text[i] == ".":
-                self.tokens.append(Token(TT_DOT, ".", line_num, base_col + i))
-                i += 1
-                continue
-
-            if text[i] == "?":
-                self.tokens.append(Token(TT_QUESTION, "?", line_num, base_col + i))
-                i += 1
-                continue
-
-            if text[i] == "(":
-                self.tokens.append(Token(TT_LPAREN, "(", line_num, base_col + i))
-                i += 1
-                continue
-            if text[i] == ")":
-                self.tokens.append(Token(TT_RPAREN, ")", line_num, base_col + i))
-                i += 1
-                continue
-
-            if text[i] == "[":
-                self.tokens.append(Token(TT_LBRACKET, "[", line_num, base_col + i))
-                i += 1
-                continue
-            if text[i] == "]":
-                self.tokens.append(Token(TT_RBRACKET, "]", line_num, base_col + i))
-                i += 1
-                continue
-
-            if text[i].isalpha() or text[i] == "_":
+            if ch.isalpha() or ch == "_":
                 j = i
                 while j < len(text) and (text[j].isalnum() or text[j] == "_"):
                     j += 1
                 word = text[i:j]
-                if word in KEYWORDS:
-                    self.tokens.append(Token(TT_KEYWORD, word, line_num, base_col + i))
-                else:
-                    self.tokens.append(Token(TT_IDENT, word, line_num, base_col + i))
+                ttype = TT_KEYWORD if word in KEYWORDS else TT_IDENT
+                self.tokens.append(Token(ttype, word, line_num, base_col + i))
                 i = j
                 continue
 
-            raise SyntaxError(f"Unknown character {text[i]!r} at line {line_num}")
+            raise SyntaxError(f"Unknown character {ch!r} at line {line_num}")
 
 
 def tokenize(source):
