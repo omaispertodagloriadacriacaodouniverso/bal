@@ -22,7 +22,7 @@ typedef struct {
 static ASTNode* new_node(NodeType type) {
     ASTNode* n = calloc(1, sizeof(ASTNode));
     n->type = type;
-    n->children = malloc(8 * sizeof(ASTNode*));
+    n->children = xmalloc(8 * sizeof(ASTNode*));
     n->child_cap = 8;
     return n;
 }
@@ -30,7 +30,7 @@ static ASTNode* new_node(NodeType type) {
 static void add_child(ASTNode* parent, ASTNode* child) {
     if (parent->child_count >= parent->child_cap) {
         parent->child_cap *= 2;
-        parent->children = realloc(parent->children, parent->child_cap * sizeof(ASTNode*));
+        parent->children = xrealloc(parent->children, parent->child_cap * sizeof(ASTNode*));
     }
     parent->children[parent->child_count++] = child;
 }
@@ -69,10 +69,10 @@ static char* parse_type(Parser* p) {
     char* base = NULL;
     if (t->type == TOK_KEYWORD && (strcmp(t->value, "int") == 0 || strcmp(t->value, "float") == 0 ||
         strcmp(t->value, "bool") == 0 || strcmp(t->value, "str") == 0 || strcmp(t->value, "void") == 0)) {
-        base = strdup(t->value);
+        base = xstrdup(t->value);
         advance(p);
     } else if (t->type == TOK_IDENT) {
-        base = strdup(t->value);
+        base = xstrdup(t->value);
         advance(p);
     } else if (t->type == TOK_LBRACKET) {
         advance(p);
@@ -80,10 +80,10 @@ static char* parse_type(Parser* p) {
         expect(p, TOK_RBRACKET, NULL);
         char buf[256];
         snprintf(buf, sizeof(buf), "[%s]", inner);
-        base = strdup(buf);
+        base = xstrdup(buf);
         free(inner);
     } else {
-        return strdup("int");
+        return xstrdup("int");
     }
     /* Nullable suffix */
     if (peek(p, 0)->type == TOK_QUESTION) {
@@ -91,7 +91,7 @@ static char* parse_type(Parser* p) {
         char buf[256];
         snprintf(buf, sizeof(buf), "%s?", base);
         free(base);
-        base = strdup(buf);
+        base = xstrdup(buf);
     }
     return base;
 }
@@ -101,37 +101,37 @@ static ASTNode* parse_primary(Parser* p) {
     Token* t = peek(p, 0);
     if (t->type == TOK_INT) {
         ASTNode* n = new_node(NODE_INT);
-        n->value = strdup(t->value);
+        n->value = xstrdup(t->value);
         advance(p);
         return n;
     }
     if (t->type == TOK_FLOAT) {
         ASTNode* n = new_node(NODE_FLOAT);
-        n->value = strdup(t->value);
+        n->value = xstrdup(t->value);
         advance(p);
         return n;
     }
     if (t->type == TOK_STR) {
         ASTNode* n = new_node(NODE_STR);
-        n->value = strdup(t->value);
+        n->value = xstrdup(t->value);
         advance(p);
         return n;
     }
     if (t->type == TOK_KEYWORD && (strcmp(t->value, "true") == 0 || strcmp(t->value, "false") == 0)) {
         ASTNode* n = new_node(NODE_BOOL);
-        n->value = strdup(t->value);
+        n->value = xstrdup(t->value);
         advance(p);
         return n;
     }
     if (t->type == TOK_KEYWORD && strcmp(t->value, "None") == 0) {
         ASTNode* n = new_node(NODE_IDENT);
-        n->value = strdup("NULL");
+        n->value = xstrdup("NULL");
         advance(p);
         return n;
     }
     if (t->type == TOK_IDENT) {
         ASTNode* n = new_node(NODE_IDENT);
-        n->value = strdup(t->value);
+        n->value = xstrdup(t->value);
         advance(p);
         return n;
     }
@@ -183,7 +183,7 @@ static ASTNode* parse_postfix(Parser* p) {
             if (field->type == TOK_IDENT) {
                 ASTNode* attr = new_node(NODE_ATTR);
                 attr->left = expr;
-                attr->value = strdup(field->value);
+                attr->value = xstrdup(field->value);
                 advance(p);
                 expr = attr;
             }
@@ -196,7 +196,7 @@ static ASTNode* parse_postfix(Parser* p) {
 
 static ASTNode* parse_unary(Parser* p) {
     if (peek(p, 0)->type == TOK_OP && (peek(p,0)->value[0] == '-' || peek(p,0)->value[0] == '+')) {
-        char* op = strdup(peek(p,0)->value);
+        char* op = xstrdup(peek(p,0)->value);
         advance(p);
         ASTNode* operand = parse_unary(p);
         ASTNode* node = new_node(NODE_UNARY);
@@ -208,7 +208,7 @@ static ASTNode* parse_unary(Parser* p) {
         advance(p);
         ASTNode* operand = parse_unary(p);
         ASTNode* node = new_node(NODE_UNARY);
-        node->value = strdup("not");
+        node->value = xstrdup("not");
         node->left = operand;
         return node;
     }
@@ -218,7 +218,7 @@ static ASTNode* parse_unary(Parser* p) {
 static ASTNode* parse_mul(Parser* p) {
     ASTNode* left = parse_unary(p);
     while (peek(p, 0)->type == TOK_OP && (peek(p,0)->value[0] == '*' || peek(p,0)->value[0] == '/' || peek(p,0)->value[0] == '%')) {
-        char* op = strdup(peek(p,0)->value);
+        char* op = xstrdup(peek(p,0)->value);
         advance(p);
         ASTNode* right = parse_unary(p);
         ASTNode* node = new_node(NODE_BINOP);
@@ -233,7 +233,7 @@ static ASTNode* parse_mul(Parser* p) {
 static ASTNode* parse_add(Parser* p) {
     ASTNode* left = parse_mul(p);
     while (peek(p, 0)->type == TOK_OP && (peek(p,0)->value[0] == '+' || peek(p,0)->value[0] == '-')) {
-        char* op = strdup(peek(p,0)->value);
+        char* op = xstrdup(peek(p,0)->value);
         advance(p);
         ASTNode* right = parse_mul(p);
         ASTNode* node = new_node(NODE_BINOP);
@@ -250,7 +250,7 @@ static ASTNode* parse_cmp(Parser* p) {
     while (peek(p, 0)->type == TOK_OP && (strcmp(peek(p,0)->value, "==") == 0 || strcmp(peek(p,0)->value, "!=") == 0 ||
            strcmp(peek(p,0)->value, "<") == 0 || strcmp(peek(p,0)->value, ">") == 0 ||
            strcmp(peek(p,0)->value, "<=") == 0 || strcmp(peek(p,0)->value, ">=") == 0)) {
-        char* op = strdup(peek(p,0)->value);
+        char* op = xstrdup(peek(p,0)->value);
         advance(p);
         ASTNode* right = parse_add(p);
         ASTNode* node = new_node(NODE_BINOP);
@@ -267,7 +267,7 @@ static ASTNode* parse_not(Parser* p) {
         advance(p);
         ASTNode* operand = parse_not(p);
         ASTNode* node = new_node(NODE_UNARY);
-        node->value = strdup("not");
+        node->value = xstrdup("not");
         node->left = operand;
         return node;
     }
@@ -280,7 +280,7 @@ static ASTNode* parse_and(Parser* p) {
         advance(p);
         ASTNode* right = parse_not(p);
         ASTNode* node = new_node(NODE_BINOP);
-        node->value = strdup("and");
+        node->value = xstrdup("and");
         node->left = left;
         node->right = right;
         left = node;
@@ -294,7 +294,7 @@ static ASTNode* parse_or(Parser* p) {
         advance(p);
         ASTNode* right = parse_and(p);
         ASTNode* node = new_node(NODE_BINOP);
-        node->value = strdup("or");
+        node->value = xstrdup("or");
         node->left = left;
         node->right = right;
         left = node;
@@ -333,7 +333,7 @@ static ASTNode* parse_stmt(Parser* p) {
             ASTNode* node = new_node(NODE_FUNC);
             Token* name = peek(p, 0);
             if (name->type == TOK_IDENT) {
-                node->value = strdup(name->value);
+                node->value = xstrdup(name->value);
                 advance(p);
             }
             expect(p, TOK_LPAREN, NULL);
@@ -341,7 +341,7 @@ static ASTNode* parse_stmt(Parser* p) {
                 ASTNode* param = new_node(NODE_PARAM);
                 Token* pname = peek(p, 0);
                 if (pname->type == TOK_IDENT) {
-                    param->value = strdup(pname->value);
+                    param->value = xstrdup(pname->value);
                     advance(p);
                 }
                 expect(p, TOK_COLON, NULL);
@@ -355,7 +355,7 @@ static ASTNode* parse_stmt(Parser* p) {
                 advance(p);
                 node->type_name = parse_type(p); /* return type */
             } else {
-                node->type_name = strdup("void");
+                node->type_name = xstrdup("void");
             }
             expect(p, TOK_COLON, NULL);
             skip_newlines(p);
@@ -368,7 +368,7 @@ static ASTNode* parse_stmt(Parser* p) {
             ASTNode* node = new_node(NODE_STRUCT);
             Token* name = peek(p, 0);
             if (name->type == TOK_IDENT) {
-                node->value = strdup(name->value);
+                node->value = xstrdup(name->value);
                 advance(p);
             }
             expect(p, TOK_COLON, NULL);
@@ -380,7 +380,7 @@ static ASTNode* parse_stmt(Parser* p) {
                 ASTNode* field = new_node(NODE_LET);
                 Token* fname = peek(p, 0);
                 if (fname->type == TOK_IDENT) {
-                    field->value = strdup(fname->value);
+                    field->value = xstrdup(fname->value);
                     advance(p);
                 }
                 expect(p, TOK_COLON, NULL);
@@ -398,7 +398,7 @@ static ASTNode* parse_stmt(Parser* p) {
             node->is_mutable = mutable;
             Token* name = peek(p, 0);
             if (name->type == TOK_IDENT) {
-                node->value = strdup(name->value);
+                node->value = xstrdup(name->value);
                 advance(p);
             }
             if (peek(p, 0)->type == TOK_COLON) {
@@ -457,7 +457,7 @@ static ASTNode* parse_stmt(Parser* p) {
             ASTNode* node = new_node(NODE_FOR);
             Token* var = peek(p, 0);
             if (var->type == TOK_IDENT) {
-                node->value = strdup(var->value);
+                node->value = xstrdup(var->value);
                 advance(p);
             }
             expect(p, TOK_KEYWORD, "in");
@@ -490,7 +490,7 @@ static ASTNode* parse_stmt(Parser* p) {
             ASTNode* node = new_node(NODE_TEST);
             Token* name = peek(p, 0);
             if (name->type == TOK_STR) {
-                node->value = strdup(name->value);
+                node->value = xstrdup(name->value);
                 advance(p);
             }
             expect(p, TOK_COLON, NULL);
@@ -514,7 +514,7 @@ static ASTNode* parse_stmt(Parser* p) {
             node->is_mutable = 1; /* reuse field as extern flag */
             Token* name = peek(p, 0);
             if (name->type == TOK_IDENT) {
-                node->value = strdup(name->value);
+                node->value = xstrdup(name->value);
                 advance(p);
             }
             expect(p, TOK_LPAREN, NULL);
@@ -522,7 +522,7 @@ static ASTNode* parse_stmt(Parser* p) {
                 ASTNode* param = new_node(NODE_PARAM);
                 Token* pname = peek(p, 0);
                 if (pname->type == TOK_IDENT) {
-                    param->value = strdup(pname->value);
+                    param->value = xstrdup(pname->value);
                     advance(p);
                 }
                 expect(p, TOK_COLON, NULL);
@@ -535,7 +535,7 @@ static ASTNode* parse_stmt(Parser* p) {
                 advance(p);
                 node->type_name = parse_type(p);
             } else {
-                node->type_name = strdup("void");
+                node->type_name = xstrdup("void");
             }
             return node;
         }
@@ -547,7 +547,7 @@ static ASTNode* parse_stmt(Parser* p) {
             expect(p, TOK_OP, "=");
             ASTNode* expr = parse_expr(p);
             ASTNode* node = new_node(NODE_LET);
-            node->value = strdup(t->value);
+            node->value = xstrdup(t->value);
             node->is_mutable = 1;
             add_child(node, expr);
             return node;

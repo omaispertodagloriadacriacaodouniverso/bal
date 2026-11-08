@@ -34,10 +34,10 @@ static int is_keyword(const char* word) {
 }
 
 static void lexer_init(Lexer* lex) {
-    lex->tokens = malloc(1024 * sizeof(Token));
+    lex->tokens = xmalloc(1024 * sizeof(Token));
     lex->count = 0;
     lex->capacity = 1024;
-    lex->indent_stack = malloc(64 * sizeof(int));
+    lex->indent_stack = xmalloc(64 * sizeof(int));
     lex->indent_stack[0] = 0;
     lex->indent_top = 0;
 }
@@ -45,10 +45,10 @@ static void lexer_init(Lexer* lex) {
 static void add_token(Lexer* lex, TokenType type, const char* value, int line, int col) {
     if (lex->count >= lex->capacity) {
         lex->capacity *= 2;
-        lex->tokens = realloc(lex->tokens, lex->capacity * sizeof(Token));
+        lex->tokens = xrealloc(lex->tokens, lex->capacity * sizeof(Token));
     }
     lex->tokens[lex->count].type = type;
-    lex->tokens[lex->count].value = strdup(value);
+    lex->tokens[lex->count].value = xstrdup(value);
     lex->tokens[lex->count].line = line;
     lex->tokens[lex->count].col = col;
     lex->count++;
@@ -89,7 +89,7 @@ static void tokenize_line(Lexer* lex, const char* text, int line_num, int base_c
                 else j++;
             }
             int slen = j - i - 1;
-            char* str = malloc(slen + 1);
+            char* str = xmalloc(slen + 1);
             memcpy(str, text + i + 1, slen);
             str[slen] = '\0';
             add_token(lex, TOK_STR, str, line_num, base_col + i);
@@ -106,7 +106,7 @@ static void tokenize_line(Lexer* lex, const char* text, int line_num, int base_c
                 j++;
             }
             int nlen = j - i;
-            char* num = malloc(nlen + 1);
+            char* num = xmalloc(nlen + 1);
             memcpy(num, text + i, nlen);
             num[nlen] = '\0';
             add_token(lex, is_float ? TOK_FLOAT : TOK_INT, num, line_num, base_col + i);
@@ -125,11 +125,11 @@ static void tokenize_line(Lexer* lex, const char* text, int line_num, int base_c
         if (strchr("+-*/%<>!=&|", text[i])) {
             if (i + 1 < len && text[i+1] == '=') {
                 char op[3] = {text[i], '=', '\0'};
-                add_token(lex, TOK_OP, strdup(op), line_num, base_col + i);
+                add_token(lex, TOK_OP, xstrdup(op), line_num, base_col + i);
                 i += 2;
             } else {
                 char op[2] = {text[i], '\0'};
-                add_token(lex, TOK_OP, strdup(op), line_num, base_col + i);
+                add_token(lex, TOK_OP, xstrdup(op), line_num, base_col + i);
                 i++;
             }
             continue;
@@ -150,7 +150,7 @@ static void tokenize_line(Lexer* lex, const char* text, int line_num, int base_c
             int j = i;
             while (j < len && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
             int wlen = j - i;
-            char* word = malloc(wlen + 1);
+            char* word = xmalloc(wlen + 1);
             memcpy(word, text + i, wlen);
             word[wlen] = '\0';
             if (is_keyword(word)) {
@@ -173,7 +173,7 @@ Token* lex_source(const char* source) {
     lexer_init(&lex);
     
     /* Split into lines */
-    char* src = strdup(source);
+    char* src = xstrdup(source);
     char* line = strtok(src, "\n");
     int line_num = 1;
     

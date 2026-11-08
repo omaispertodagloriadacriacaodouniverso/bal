@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "lexer.h"
 #include "parser.h"
@@ -9,18 +10,20 @@
 /* ── Type mapping ── */
 static const char* ctype_of(const char* t) {
     if (!t) return "int";
-    /* strip ? suffix */
-    static char buf[256];
-    strncpy(buf, t, sizeof(buf)-1);
-    buf[sizeof(buf)-1] = '\0';
-    int len = strlen(buf);
-    if (len > 0 && buf[len-1] == '?') buf[len-1] = '\0';
-    if (strcmp(buf, "int") == 0) return "int";
-    if (strcmp(buf, "float") == 0) return "double";
-    if (strcmp(buf, "bool") == 0) return "int";
-    if (strcmp(buf, "str") == 0) return "const char*";
-    if (strcmp(buf, "void") == 0) return "void";
-    return buf; /* struct name or other */
+    /* strip ? suffix without a shared static buffer */
+    static const char* MAP[][2] = {
+        {"int", "int"}, {"float", "double"}, {"bool", "int"},
+        {"str", "const char*"}, {"void", "void"}, {NULL, NULL}
+    };
+    /* compare against t with optional trailing '?' */
+    size_t n = strlen(t);
+    int nullable = (n > 0 && t[n-1] == '?');
+    size_t base_len = nullable ? n - 1 : n;
+    for (int i = 0; MAP[i][0]; i++) {
+        if (strlen(MAP[i][0]) == base_len && strncmp(MAP[i][0], t, base_len) == 0)
+            return MAP[i][1];
+    }
+    return t; /* struct name or other — returned as-is (caller must not free) */
 }
 
 /* ── Code generation state ── */
@@ -30,92 +33,91 @@ typedef struct {
     int capacity;
     int indent;
     /* tracking */
-    char** array_vars;
-    int array_count;
-    char** struct_vars;
-    char** struct_types;
-    int struct_var_count;
-    char** func_returns;
-    char** func_return_types;
-    int func_return_count;
-    char** declared_vars;
-    int declared_count;
+    StrVec array_vars;
+    StrVec struct_vars;
+    StrVec struct_types;
+    StrVec func_returns;
+    StrVec func_return_types;
+    StrVec declared_vars;
     ASTNode** structs;
-    int struct_count;
+    int struct_count, struct_cap;
     ASTNode** tests;
-    int test_count;
+    int test_count, test_cap;
     int in_test;
     int in_global;
-    char** global_init;
-    int global_init_count;
-    char** global_names;
-    int global_names_count;
+    StrVec global_init;
+    StrVec global_names;
 } CodeGen;
 
 static void cg_init(CodeGen* cg) {
-    cg->lines = malloc(4096 * sizeof(char*));
+    cg->lines = xmalloc(4096 * sizeof(char*));
     cg->count = 0;
     cg->capacity = 4096;
     cg->indent = 0;
-    cg->array_vars = malloc(256 * sizeof(char*));
-    cg->array_count = 0;
-    cg->struct_vars = malloc(256 * sizeof(char*));
-    cg->struct_types = malloc(256 * sizeof(char*));
-    cg->struct_var_count = 0;
-    cg->func_returns = malloc(256 * sizeof(char*));
-    cg->func_return_types = malloc(256 * sizeof(char*));
-    cg->func_return_count = 0;
-    cg->structs = malloc(64 * sizeof(ASTNode*));
-    cg->struct_count = 0;
-    cg->declared_vars = malloc(256 * sizeof(char*));
-    cg->declared_count = 0;
-    cg->tests = malloc(64 * sizeof(ASTNode*));
-    cg->test_count = 0;
+    sv_init(&cg->array_vars);
+    sv_init(&cg->struct_vars);
+    sv_init(&cg->struct_types);
+    sv_init(&cg->func_returns);
+    sv_init(&cg->func_return_types);
+    sv_init(&cg->declared_vars);
+    sv_init(&cg->global_init);
+    sv_init(&cg->global_names);
+    cg->structs = NULL; cg->struct_count = 0; cg->struct_cap = 0;
+    cg->tests = NULL; cg->test_count = 0; cg->test_cap = 0;
     cg->in_test = 0;
     cg->in_global = 0;
-    cg->global_init = malloc(256 * sizeof(char*));
-    cg->global_init_count = 0;
-    cg->global_names = malloc(256 * sizeof(char*));
-    cg->global_names_count = 0;
 }
 
 static void cg_emit(CodeGen* cg, const char* code) {
     if (cg->count >= cg->capacity) {
         cg->capacity *= 2;
-        cg->lines = realloc(cg->lines, cg->capacity * sizeof(char*));
+        cg->lines = xrealloc(cg->lines, cg->capacity * sizeof(char*));
     }
     char buf[4096];
     snprintf(buf, sizeof(buf), "%*s%s", cg->indent * 4, "", code);
-    cg->lines[cg->count++] = strdup(buf);
+    cg->lines[cg->count++] = xstrdup(buf);
+}
+
+
+/* Append formatted text to buf at pos, clamping pos to buffer size (no underflow). */
+static int sb_append(char* buf, size_t size, int pos, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + pos, size - (size_t)pos, fmt, ap);
+    va_end(ap);
+    if (n < 0) return pos;
+    pos += n;
+    if ((size_t)pos >= size - 1) pos = (int)size - 1;
+    return pos;
 }
 
 static int is_array_var(CodeGen* cg, const char* name) {
-    for (int i = 0; i < cg->array_count; i++)
-        if (strcmp(cg->array_vars[i], name) == 0) return 1;
-    return 0;
+    return sv_has(&cg->array_vars, name);
 }
 
 static const char* struct_var_type(CodeGen* cg, const char* name) {
-    for (int i = 0; i < cg->struct_var_count; i++)
-        if (strcmp(cg->struct_vars[i], name) == 0) return cg->struct_types[i];
+    int i = sv_find(&cg->struct_vars, name);
+    if (i >= 0) return cg->struct_types.items[i];
     return NULL;
 }
 
 static const char* func_return_type(CodeGen* cg, const char* name) {
-    for (int i = 0; i < cg->func_return_count; i++)
-        if (strcmp(cg->func_returns[i], name) == 0) return cg->func_return_types[i];
+    int i = sv_find(&cg->func_returns, name);
+    if (i >= 0) return cg->func_return_types.items[i];
+    return NULL;
     return NULL;
 }
 
 static int is_struct_name(CodeGen* cg, const char* name) {
     for (int i = 0; i < cg->struct_count; i++)
-        if (strcmp(cg->structs[i]->value, name) == 0) return 1;
+        if (cg->structs[i]->value && strcmp(cg->structs[i]->value, name) == 0) return 1;
     return 0;
 }
 
 static ASTNode* find_struct(CodeGen* cg, const char* name) {
     for (int i = 0; i < cg->struct_count; i++)
-        if (strcmp(cg->structs[i]->value, name) == 0) return cg->structs[i];
+        if (cg->structs[i]->value && strcmp(cg->structs[i]->value, name) == 0) return cg->structs[i];
+    return NULL;
     return NULL;
 }
 
@@ -144,6 +146,7 @@ static void collect_lets(CodeGen* cg, ASTNode* node, char names[][256], ASTNode*
         for (int i = 0; i < *count; i++) if (strcmp(names[i], node->value) == 0) { found = 1; break; }
         if (!found && *count < max) {
             strncpy(names[*count], node->value, 255);
+            names[*count][255] = '\0';  /* guarantee NUL termination */
             nodes[*count] = node;
             (*count)++;
         }
@@ -195,11 +198,10 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
             char name[256];
             snprintf(name, sizeof(name), "%s", stmt->value);
             /* Track as array var */
-            cg->array_vars[cg->array_count++] = strdup(name);
+            sv_push(&cg->array_vars, name);
             char buf[4096];
             int hoisted = 0;
-            for (int d = 0; d < cg->declared_count; d++)
-                if (strcmp(cg->declared_vars[d], name) == 0) { hoisted = 1; break; }
+            if (sv_has(&cg->declared_vars, name)) hoisted = 1;
             if (cg->in_global) {
                 snprintf(buf, sizeof(buf), "int* _%s_data;", name);
                 cg_emit(cg, buf);
@@ -207,7 +209,7 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
                 cg_emit(cg, buf);
                 char g[4096];
                 snprintf(g, sizeof(g), "_%s_data = malloc(%d * sizeof(int));", name, arr->child_count);
-                cg->global_init[cg->global_init_count++] = strdup(g);
+                sv_push(&cg->global_init, g);
             } else if (hoisted) {
             snprintf(buf, sizeof(buf), "_%s_data = malloc(%d * sizeof(int));", name, arr->child_count);
             cg_emit(cg, buf);
@@ -219,7 +221,7 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
                 char* val = gen_expr(cg, arr->children[i]);
                 if (cg->in_global) {
                     snprintf(buf, sizeof(buf), "_%s_data[%d] = %s;", name, i, val);
-                    cg->global_init[cg->global_init_count++] = strdup(buf);
+                    sv_push(&cg->global_init, buf);
                 } else {
                     snprintf(buf, sizeof(buf), "_%s_data[%d] = %s;", name, i, val);
                     cg_emit(cg, buf);
@@ -228,7 +230,7 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
             }
             if (cg->in_global) {
                 snprintf(buf, sizeof(buf), "%s = bal_array_new(_%s_data, %d);", name, name, arr->child_count);
-                cg->global_init[cg->global_init_count++] = strdup(buf);
+                sv_push(&cg->global_init, buf);
             } else if (hoisted) {
                 snprintf(buf, sizeof(buf), "%s = bal_array_new(_%s_data, %d);", name, name, arr->child_count);
                 cg_emit(cg, buf);
@@ -283,26 +285,23 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
 
         /* None → 0/NULL */
         if (strcmp(init, "None") == 0) {
-            if (strcmp(ctype, "int") == 0 || strcmp(ctype, "double") == 0) init = strdup("0");
-            else init = strdup("NULL");
+            if (strcmp(ctype, "int") == 0 || strcmp(ctype, "double") == 0) init = xstrdup("0");
+            else init = xstrdup("NULL");
         }
 
         /* Check if already declared (reassignment) */
         int already_declared = 0;
-        for (int i = 0; i < cg->declared_count; i++) {
-            if (strcmp(cg->declared_vars[i], stmt->value) == 0) { already_declared = 1; break; }
-        }
+        if (sv_has(&cg->declared_vars, stmt->value)) already_declared = 1;
 
         if (already_declared) {
             char buf[4096];
             snprintf(buf, sizeof(buf), "%s = %s;", stmt->value, init);
             cg_emit(cg, buf);
         } else {
-            cg->declared_vars[cg->declared_count++] = strdup(stmt->value);
+            sv_push(&cg->declared_vars, stmt->value);
             if (is_struct) {
-                cg->struct_vars[cg->struct_var_count] = strdup(stmt->value);
-                cg->struct_types[cg->struct_var_count] = strdup(ctype);
-                cg->struct_var_count++;
+                sv_push(&cg->struct_vars, stmt->value);
+                sv_push(&cg->struct_types, ctype);
                 char buf[4096];
                 snprintf(buf, sizeof(buf), "%s %s = %s;", ctype, stmt->value, init);
                 cg_emit(cg, buf);
@@ -431,12 +430,11 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
             else if (stmt->children[0]->type == NODE_CALL && stmt->children[0]->left && stmt->children[0]->left->type == NODE_IDENT) {
                 const char* fn = stmt->children[0]->left->value;
                 /* Check func return type */
-                for (int k = 0; k < cg->func_return_count; k++) {
-                    if (strcmp(cg->func_returns[k], fn) == 0) {
-                        if (strcmp(cg->func_return_types[k], "float") == 0) fmt = "%f";
-                        if (strcmp(cg->func_return_types[k], "str") == 0) fmt = "%s";
-                        if (strcmp(cg->func_return_types[k], "double") == 0) fmt = "%f";
-                    }
+                int k = sv_find(&cg->func_returns, fn);
+                if (k >= 0) {
+                    const char* rt = cg->func_return_types.items[k];
+                    if (strcmp(rt, "float") == 0 || strcmp(rt, "double") == 0) fmt = "%f";
+                    if (strcmp(rt, "str") == 0) fmt = "%s";
                 }
                 if (strcmp(fn, "greet") == 0 || strcmp(fn, "str_concat") == 0 ||
                     strcmp(fn, "read_file") == 0 || strcmp(fn, "str_slice") == 0 ||
@@ -482,23 +480,23 @@ static void gen_stmt(CodeGen* cg, ASTNode* stmt) {
 
 /* ── gen_expr ── */
 static char* gen_expr(CodeGen* cg, ASTNode* node) {
-    if (!node) return strdup("0");
+    if (!node) return xstrdup("0");
     char buf[4096];
 
     switch (node->type) {
         case NODE_INT:
-            return strdup(node->value);
+            return xstrdup(node->value);
         case NODE_FLOAT:
-            return strdup(node->value);
+            return xstrdup(node->value);
         case NODE_STR:
             snprintf(buf, sizeof(buf), "\"%s\"", node->value);
-            return strdup(buf);
+            return xstrdup(buf);
         case NODE_BOOL:
-            return strdup(strcmp(node->value, "true") == 0 ? "1" : "0");
+            return xstrdup(strcmp(node->value, "true") == 0 ? "1" : "0");
         case NODE_IDENT:
-            if (strcmp(node->value, "NULL") == 0) return strdup("NULL");
-            if (strcmp(node->value, "None") == 0) return strdup("0");
-            return strdup(node->value);
+            if (strcmp(node->value, "NULL") == 0) return xstrdup("NULL");
+            if (strcmp(node->value, "None") == 0) return xstrdup("0");
+            return xstrdup(node->value);
         case NODE_BINOP: {
             char* left = gen_expr(cg, node->left);
             char* right = gen_expr(cg, node->right);
@@ -526,7 +524,7 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                 else if (c == '\'') snprintf(cbuf, sizeof(cbuf), "'\\''");
                 else snprintf(cbuf, sizeof(cbuf), "'%c'", c);
                 snprintf(buf, sizeof(buf), "(%s %s %s)", other, node->value, cbuf);
-                char* res = strdup(buf);
+                char* res = xstrdup(buf);
                 free(left); free(right);
                 return res;
             }
@@ -537,7 +535,7 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                 } else {
                     snprintf(buf, sizeof(buf), "(%s + %s)", left, right);
                 }
-                char* res = strdup(buf);
+                char* res = xstrdup(buf);
                 free(left); free(right);
                 return res;
             }
@@ -554,7 +552,7 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
             else if (strcmp(node->value, "and") == 0) { snprintf(buf, sizeof(buf), "(%s && %s)", left, right); }
             else if (strcmp(node->value, "or") == 0) { snprintf(buf, sizeof(buf), "(%s || %s)", left, right); }
             else { snprintf(buf, sizeof(buf), "(%s %s %s)", left, node->value, right); }
-            char* res = strdup(buf);
+            char* res = xstrdup(buf);
             free(left); free(right);
             return res;
         }
@@ -563,7 +561,7 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
             if (strcmp(node->value, "-") == 0) snprintf(buf, sizeof(buf), "(-%s)", operand);
             else if (strcmp(node->value, "not") == 0) snprintf(buf, sizeof(buf), "(!%s)", operand);
             else snprintf(buf, sizeof(buf), "(%s%s)", node->value, operand);
-            char* res = strdup(buf);
+            char* res = xstrdup(buf);
             free(operand);
             return res;
         }
@@ -572,22 +570,22 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
             if (node->left && node->left->type == NODE_ATTR) {
                 ASTNode* attr = node->left;
                 if (attr->left && attr->left->type == NODE_IDENT && strcmp(attr->left->value, "Arena") == 0 && strcmp(attr->value, "new") == 0) {
-                    char* arg = node->child_count > 0 ? gen_expr(cg, node->children[0]) : strdup("0");
+                    char* arg = node->child_count > 0 ? gen_expr(cg, node->children[0]) : xstrdup("0");
                     snprintf(buf, sizeof(buf), "arena_new(%s)", arg);
                     free(arg);
-                    return strdup(buf);
+                    return xstrdup(buf);
                 }
                 char* obj = gen_expr(cg, attr->left);
                 if (strcmp(attr->value, "alloc") == 0) {
-                    char* arg = node->child_count > 0 ? gen_expr(cg, node->children[0]) : strdup("0");
+                    char* arg = node->child_count > 0 ? gen_expr(cg, node->children[0]) : xstrdup("0");
                     snprintf(buf, sizeof(buf), "arena_alloc(&%s, %s)", obj, arg);
                     free(obj); free(arg);
-                    return strdup(buf);
+                    return xstrdup(buf);
                 }
                 if (strcmp(attr->value, "free") == 0) {
                     snprintf(buf, sizeof(buf), "(arena_free(&%s), 0)", obj);
                     free(obj);
-                    return strdup(buf);
+                    return xstrdup(buf);
                 }
             }
             /* Struct construction */
@@ -597,12 +595,12 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                 int pos = 0;
                 for (int i = 0; i < node->child_count && i < struct_def->child_count; i++) {
                     char* val = gen_expr(cg, node->children[i]);
-                    if (i > 0) pos += snprintf(fields + pos, sizeof(fields) - pos, ", ");
-                    pos += snprintf(fields + pos, sizeof(fields) - pos, ".%s = %s", struct_def->children[i]->value, val);
+                    if (i > 0) pos = sb_append(fields, sizeof(fields), pos, ", ");
+                    pos = sb_append(fields, sizeof(fields), pos, ".%s = %s", struct_def->children[i]->value, val);
                     free(val);
                 }
                 snprintf(buf, sizeof(buf), "(%s){%s}", node->left->value, fields);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             char* func = gen_expr(cg, node->left);
             /* Builtins */
@@ -611,51 +609,51 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                     char* arr = node->children[0]->value;
                     snprintf(buf, sizeof(buf), "%s.len", arr);
                     free(func);
-                    return strdup(buf);
+                    return xstrdup(buf);
                 }
                 char* arg = gen_expr(cg, node->children[0]);
                 snprintf(buf, sizeof(buf), "(int)strlen(%s)", arg);
                 free(func); free(arg);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             if (strcmp(func, "char_at") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
                 char* idx = gen_expr(cg, node->children[1]);
                 snprintf(buf, sizeof(buf), "(int)(unsigned char)(%s)[%s]", arg, idx);
                 free(func); free(arg); free(idx);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             if (strcmp(func, "str_eq") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
                 char* arg2 = gen_expr(cg, node->children[1]);
                 snprintf(buf, sizeof(buf), "str_eq(%s, %s)", arg, arg2);
                 free(func); free(arg); free(arg2);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             if (strcmp(func, "str_len") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
                 snprintf(buf, sizeof(buf), "(int)strlen(%s)", arg);
                 free(func); free(arg);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             if (strcmp(func, "read_file") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
                 snprintf(buf, sizeof(buf), "read_file(%s)", arg);
                 free(func); free(arg);
-                return strdup(buf);
+                return xstrdup(buf);
             }
-            if (strcmp(func, "num_args") == 0) { free(func); return strdup("argc"); }
+            if (strcmp(func, "num_args") == 0) { free(func); return xstrdup("argc"); }
             if (strcmp(func, "get_arg") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
                 snprintf(buf, sizeof(buf), "argv[%s]", arg);
                 free(func); free(arg);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             if (strcmp(func, "is_none") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
                 snprintf(buf, sizeof(buf), "(%s == 0)", arg);
                 free(func); free(arg);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             if (strcmp(func, "unwrap") == 0) {
                 char* arg = gen_expr(cg, node->children[0]);
@@ -669,27 +667,27 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                     return arg;
                 }
                 free(func);
-                return strdup("0");
+                return xstrdup("0");
             }
             if (strcmp(func, "append") == 0) {
                 char* arr = gen_expr(cg, node->children[0]);
                 char* val = gen_expr(cg, node->children[1]);
                 snprintf(buf, sizeof(buf), "(bal_array_append(&%s, %s), 0)", arr, val);
                 free(func); free(arr); free(val);
-                return strdup(buf);
+                return xstrdup(buf);
             }
             /* Generic function call */
             char args[4096] = "";
             int pos = 0;
             for (int i = 0; i < node->child_count; i++) {
                 char* a = gen_expr(cg, node->children[i]);
-                if (i > 0) pos += snprintf(args + pos, sizeof(args) - pos, ", ");
-                pos += snprintf(args + pos, sizeof(args) - pos, "%s", a);
+                if (i > 0) pos = sb_append(args, sizeof(args), pos, ", ");
+                pos = sb_append(args, sizeof(args), pos, "%s", a);
                 free(a);
             }
             snprintf(buf, sizeof(buf), "%s(%s)", func, args);
             free(func);
-            return strdup(buf);
+            return xstrdup(buf);
         }
         case NODE_INDEX: {
             char* obj = gen_expr(cg, node->left);
@@ -700,20 +698,20 @@ static char* gen_expr(CodeGen* cg, ASTNode* node) {
                 snprintf(buf, sizeof(buf), "%s[%s]", obj, idx);
             }
             free(obj); free(idx);
-            return strdup(buf);
+            return xstrdup(buf);
         }
         case NODE_ATTR: {
             char* obj = gen_expr(cg, node->left);
             snprintf(buf, sizeof(buf), "%s.%s", obj, node->value);
             free(obj);
-            return strdup(buf);
+            return xstrdup(buf);
         }
         case NODE_ARRAY: {
             /* Handled in gen_stmt as LetStmt; standalone array expr not supported */
-            return strdup("0");
+            return xstrdup("0");
         }
         default:
-            return strdup("0");
+            return xstrdup("0");
     }
 }
 
@@ -722,9 +720,11 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
     /* First pass: collect structs, tests and function signatures */
     for (int i = 0; i < node->child_count; i++) {
         if (node->children[i]->type == NODE_STRUCT) {
+            if (cg->struct_count == cg->struct_cap) { cg->struct_cap = cg->struct_cap ? cg->struct_cap*2 : 8; cg->structs = xrealloc(cg->structs, cg->struct_cap * sizeof(ASTNode*)); }
             cg->structs[cg->struct_count++] = node->children[i];
         }
         if (node->children[i]->type == NODE_TEST) {
+            if (cg->test_count == cg->test_cap) { cg->test_cap = cg->test_cap ? cg->test_cap*2 : 8; cg->tests = xrealloc(cg->tests, cg->test_cap * sizeof(ASTNode*)); }
             cg->tests[cg->test_count++] = node->children[i];
         }
     }
@@ -759,19 +759,19 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
         ASTNode* c = node->children[i];
         if (c->type != NODE_STRUCT && c->type != NODE_FUNC && c->type != NODE_TEST) {
             cg->indent = 0;
-            cg->declared_count = 0;
+            sv_clear(&cg->declared_vars);
             cg->in_global = 1;
             if (c->type == NODE_LET && c->value)
-                cg->global_names[cg->global_names_count++] = strdup(c->value);
+                sv_push(&cg->global_names, c->value);
             gen_stmt(cg, c);
             cg->in_global = 0;
         }
     }
     cg_emit(cg, "");
-    if (cg->global_init_count > 0) {
+    if (cg->global_init.count > 0) {
         cg_emit(cg, "static void bal_init_globals(void) {");
         cg->indent++;
-        for (int i = 0; i < cg->global_init_count; i++) cg_emit(cg, cg->global_init[i]);
+        for (int i = 0; i < cg->global_init.count; i++) cg_emit(cg, cg->global_init.items[i]);
         cg->indent--;
         cg_emit(cg, "}");
         cg_emit(cg, "");
@@ -806,9 +806,8 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
         if (node->children[i]->type == NODE_FUNC) {
             ASTNode* f = node->children[i];
             /* Track func return type */
-            cg->func_returns[cg->func_return_count] = strdup(f->value);
-            cg->func_return_types[cg->func_return_count] = strdup(f->type_name ? f->type_name : "void");
-            cg->func_return_count++;
+            sv_push(&cg->func_returns, f->value);
+            sv_push(&cg->func_return_types, f->type_name ? f->type_name : "void");
             /* extern check */
             int is_extern = f->is_mutable; /* reused field */
             if (is_extern) continue; /* libc already declares it */
@@ -816,9 +815,9 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
             int pos = 0;
             for (int j = 0; j < f->child_count; j++) {
                 if (f->children[j]->type == NODE_PARAM) {
-                    if (pos > 0) pos += snprintf(params + pos, sizeof(params) - pos, ", ");
+                    if (pos > 0) pos = sb_append(params, sizeof(params), pos, ", ");
                     const char* tn = f->children[j]->type_name ? f->children[j]->type_name : "int";
-                    pos += snprintf(params + pos, sizeof(params) - pos, "%s %s", ctype_of(tn), f->children[j]->value);
+                    pos = sb_append(params, sizeof(params), pos, "%s %s", ctype_of(tn), f->children[j]->value);
                 }
             }
             if (f->child_count == 0 || (f->child_count == 1 && f->children[0]->type == NODE_BLOCK)) {
@@ -827,7 +826,7 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
             }
             const char* ret = f->type_name ? ctype_of(f->type_name) : "void";
             const char* fname = f->value;
-            if (strcmp(f->value, "main") == 0) {
+            if (f->value && strcmp(f->value, "main") == 0) {
                 ret = "int";
                 strcpy(params, "int argc, char** argv");
                 if (cg->test_count > 0) fname = "bal_user_main";
@@ -848,7 +847,7 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
 
             const char* ret = f->type_name ? ctype_of(f->type_name) : "void";
             const char* fname = f->value;
-            if (strcmp(f->value, "main") == 0) {
+            if (f->value && strcmp(f->value, "main") == 0) {
                 ret = "int";
                 if (cg->test_count > 0) fname = "bal_user_main";
             }
@@ -857,22 +856,22 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
             int pos = 0;
             for (int j = 0; j < f->child_count; j++) {
                 if (f->children[j]->type == NODE_PARAM) {
-                    if (pos > 0) pos += snprintf(params + pos, sizeof(params) - pos, ", ");
+                    if (pos > 0) pos = sb_append(params, sizeof(params), pos, ", ");
                     const char* tn = f->children[j]->type_name ? f->children[j]->type_name : "int";
-                    pos += snprintf(params + pos, sizeof(params) - pos, "%s %s", ctype_of(tn), f->children[j]->value);
+                    pos = sb_append(params, sizeof(params), pos, "%s %s", ctype_of(tn), f->children[j]->value);
                 }
             }
             if (strlen(params) == 0) strcpy(params, "void");
-            if (strcmp(f->value, "main") == 0) strcpy(params, "int argc, char** argv");
+            if (f->value && strcmp(f->value, "main") == 0) strcpy(params, "int argc, char** argv");
 
             char buf[4096];
             snprintf(buf, sizeof(buf), "%s %s(%s) {", ret, fname, params);
             cg_emit(cg, buf);
             cg->indent++;
-            cg->declared_count = 0; /* reset per function */
-            for (int g = 0; g < cg->global_names_count; g++)
-                cg->declared_vars[cg->declared_count++] = strdup(cg->global_names[g]);
-            if (strcmp(f->value, "main") == 0 && cg->global_init_count > 0)
+            sv_clear(&cg->declared_vars); /* reset per function */
+            for (int g = 0; g < cg->global_names.count; g++)
+                sv_push(&cg->declared_vars, cg->global_names.items[g]);
+            if (f->value && strcmp(f->value, "main") == 0 && cg->global_init.count > 0)
                 cg_emit(cg, "bal_init_globals();");
             /* hoist let/var declarations to function top (C block scope) */
             {
@@ -881,15 +880,13 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
                 int ncount = 0;
                 collect_lets(cg, f, names, nodes, &ncount, 128);
                 for (int ni = 0; ni < ncount; ni++) {
-                    int already = 0;
-                    for (int d = 0; d < cg->declared_count; d++)
-                        if (strcmp(cg->declared_vars[d], names[ni]) == 0) { already = 1; break; }
+                    int already = sv_has(&cg->declared_vars, names[ni]);
                     if (already) continue;
-                    cg->declared_vars[cg->declared_count++] = strdup(names[ni]);
+                    sv_push(&cg->declared_vars, names[ni]);
                     ASTNode* ln = nodes[ni];
                     char decl[512];
                     if (ln->child_count >= 1 && ln->children[0]->type == NODE_ARRAY) {
-                        cg->array_vars[cg->array_count++] = strdup(names[ni]);
+                        sv_push(&cg->array_vars, names[ni]);
                         snprintf(decl, sizeof(decl), "int* _%s_data; BalArray %s;", names[ni], names[ni]);
                     } else {
                         const char* tn = ln->type_name ? ln->type_name : infer_ctype(cg, ln->children[0]);
@@ -911,7 +908,7 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
             }
 
             /* Add return for main */
-            if (strcmp(f->value, "main") == 0) {
+            if (f->value && strcmp(f->value, "main") == 0) {
                 /* Check if last stmt was return */
                 int has_return = 0;
                 if (body) {
@@ -945,7 +942,7 @@ static void gen_program(CodeGen* cg, ASTNode* node) {
             snprintf(buf, sizeof(buf), "static int bal_test_%d(void) {", i);
             cg_emit(cg, buf);
             cg->indent++;
-            cg->declared_count = 0;
+            sv_clear(&cg->declared_vars);
             cg->in_test = 1;
             if (t->child_count > 0 && t->children[0]->type == NODE_BLOCK) {
                 for (int j = 0; j < t->children[0]->child_count; j++)
@@ -994,7 +991,7 @@ int main(int argc, char** argv) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    char* src = malloc(sz + 1);
+    char* src = xmalloc(sz + 1);
     fread(src, 1, sz, f);
     src[sz] = '\0';
     fclose(f);
