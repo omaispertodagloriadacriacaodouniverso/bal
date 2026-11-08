@@ -11,22 +11,7 @@ from parser import (parse, Program, FuncDef, Param, StructDef, LetStmt, ReturnSt
     IfStmt, WhileStmt, ForStmt, ExprStmt, PrintStmt, BinOp, UnaryOp, Call,
     Ident, IntLit, FloatLit, StrLit, BoolLit, Index, Attr, TestDef, AssertStmt, AssignStmt)
 from prelude import prelude_lines
-
-TYPE_MAP = {
-    "int": "int",
-    "float": "double",
-    "bool": "int",
-    "str": "const char*",
-    "void": "void",
-    "Arena": "Arena",
-}
-
-def ctype_of(t):
-    if t is None:
-        return "int"
-    if t.endswith("?"):
-        t = t[:-1]
-    return TYPE_MAP.get(t, t)
+from baltypes import ctype_of, infer_expr_type, BUILTIN_RETURN_TYPES
 
 class CodeGen:
     def __init__(self):
@@ -507,96 +492,54 @@ class CodeGen:
         return "0"
 
     def infer_type(self, expr):
-        if isinstance(expr, IntLit):
-            return "int"
-        if isinstance(expr, FloatLit):
-            return "double"
-        if isinstance(expr, StrLit):
-            return "const char*"
-        if isinstance(expr, BoolLit):
-            return "int"
-        if isinstance(expr, BinOp):
-            if expr.op in ("+", "-", "*", "/", "%"):
-                lt = self.infer_type(expr.left)
-                rt = self.infer_type(expr.right)
-                if lt == "const char*" or rt == "const char*":
-                    return "const char*"
-                if lt == "double" or rt == "double":
-                    return "double"
-                return "int"
-            return "int"
-        if isinstance(expr, Call):
-            if isinstance(expr.func, Attr):
-                if isinstance(expr.func.obj, Ident) and expr.func.obj.name == "Arena" and expr.func.field == "new":
-                    return "Arena"
-                if expr.func.field == "alloc":
-                    return "void*"
-                if expr.func.field == "free":
-                    return "int"
-            if isinstance(expr.func, Ident):
-                if expr.func.name == "len":
-                    return "int"
-                if expr.func.name == "read_file":
-                    return "const char*"
-                if expr.func.name == "get_arg":
-                    return "const char*"
-                if expr.func.name == "append":
-                    return "int"
-                if expr.func.name in ("str_find","str_len","str_contains","str_count","is_none","unwrap","char_at"):
-                    return "int"
-                if expr.func.name in ("str_slice","str_trim","str_concat"):
-                    return "const char*"
-                if expr.func.name in [s.name for s in self.structs]:
-                    return expr.func.name
-                if expr.func.name in self.func_returns:
-                    rt = self.func_returns[expr.func.name]
-                    if rt.endswith("?"):
-                        rt = rt[:-1]
-                    return ctype_of(rt)
-        if isinstance(expr, Ident):
-            if expr.name in self.array_vars:
-                return "BalArray"
-            if expr.name in self.struct_vars:
-                return self.struct_vars[expr.name]
-        if isinstance(expr, Attr):
-            if isinstance(expr.obj, Ident) and expr.obj.name in self.struct_vars:
-                struct_name = self.struct_vars[expr.obj.name]
-                struct_def = next((s for s in self.structs if s.name == struct_name), None)
-                if struct_def:
-                    for fname, ftype in struct_def.fields:
-                        if fname == expr.field:
-                            return ctype_of(ftype)
-        return "int"
+        """Delegate to types.infer_expr_type with current codegen context."""
+        return infer_expr_type(expr, array_vars=self.array_vars,
+                               struct_vars=self.struct_vars,
+                               structs=self.structs,
+                               func_returns=self.func_returns)
 
 
-def compile_bal(source, output_path=None):
-    from parser import parse
+def emit_c(source):
+    """Transpile bal source to C code. Returns the C source as a string."""
     ast = parse(source)
     codegen = CodeGen()
     codegen.gen(ast)
-    c_code = "\n".join(codegen.lines)
+    return "\n".join(codegen.lines)
 
-    if output_path:
-        with open(output_path, "w") as f:
-            f.write(c_code)
-        return c_code
 
+def compile_to_binary(c_code, keep_c=False):
+    """Compile C code to a binary. Returns exe_path, or None on failure.
+    Cleans up the temporary .c file unless keep_c=True."""
     with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
         f.write(c_code)
         c_path = f.name
 
-    exe_path = c_path.replace(".c", "")
+    exe_path = c_path[:-2]  # strip ".c"
     result = subprocess.run(
         ["gcc", "-O2", "-o", exe_path, c_path],
         capture_output=True, text=True
     )
+    if not keep_c:
+        os.unlink(c_path)
     if result.returncode != 0:
-        print("C compilation failed:")
-        print(result.stderr)
-        print("\n--- Generated C ---")
-        print(c_code)
+        print("C compilation failed:", file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
         return None
+    return exe_path
 
+
+def compile_bal(source, output_path=None):
+    """Full pipeline: bal source -> C -> binary.
+    With output_path: writes C to that path, returns C code.
+    Without: returns (exe_path, c_code) or None on failure."""
+    c_code = emit_c(source)
+    if output_path:
+        with open(output_path, "w") as f:
+            f.write(c_code)
+        return c_code
+    exe_path = compile_to_binary(c_code)
+    if exe_path is None:
+        return None
     return exe_path, c_code
 
 
@@ -605,21 +548,19 @@ def main():
         print("Usage: bal <file.bal> [--emit-c]")
         sys.exit(1)
 
-    source = open(sys.argv[1]).read()
-    emit_c = "--emit-c" in sys.argv
+    with open(sys.argv[1]) as f:
+        source = f.read()
+    emit_c_only = "--emit-c" in sys.argv
 
-    if emit_c:
-        ast = parse(source)
-        codegen = CodeGen()
-        codegen.gen(ast)
-        print("\n".join(codegen.lines))
+    if emit_c_only:
+        print(emit_c(source))
         return
 
     result = compile_bal(source)
     if result is None:
         sys.exit(1)
 
-    exe_path, c_code = result
+    exe_path, _c_code = result
     run = subprocess.run([exe_path] + sys.argv[2:], capture_output=False)
     os.unlink(exe_path)
     sys.exit(run.returncode)
