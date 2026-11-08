@@ -7,11 +7,11 @@ import tempfile
 import subprocess
 
 sys.path.insert(0, os.path.dirname(__file__))
-from parser import (parse, Program, FuncDef, Param, StructDef, LetStmt, ReturnStmt,
+from parser import (parse, Program, FuncDef, StructDef, LetStmt, ReturnStmt,
     IfStmt, WhileStmt, ForStmt, ExprStmt, PrintStmt, BinOp, UnaryOp, Call,
     Ident, IntLit, FloatLit, StrLit, BoolLit, Index, Attr, TestDef, AssertStmt, AssignStmt, ListExpr)
 from prelude import prelude_lines
-from baltypes import ctype_of, infer_expr_type, BUILTIN_RETURN_TYPES
+from baltypes import ctype_of, infer_expr_type
 
 class CodeGen:
     def __init__(self):
@@ -25,7 +25,6 @@ class CodeGen:
         self.func_returns = {}
         self.array_vars = set()
         self.struct_vars = {}
-        self.nullable_vars = set()
         self.in_test = False
         self.in_global = False
         self.global_init = []
@@ -35,88 +34,97 @@ class CodeGen:
         self.lines.append("    " * self.indent + code)
 
     def gen(self, node):
-        if isinstance(node, Program):
-            for stmt in node.stmts:
-                if isinstance(stmt, StructDef):
-                    self.structs.append(stmt)
-                elif isinstance(stmt, FuncDef):
-                    self.func_returns[stmt.name] = stmt.ret_type
-                    if stmt.body == []:
-                        self.externs.append(stmt)
-                    else:
-                        self.functions.append(stmt)
-                elif isinstance(stmt, TestDef):
-                    self.tests.append(stmt)
-                else:
-                    # top-level statement -> C global
-                    self.indent = 0
-                    self.in_global = True
-                    if isinstance(stmt, LetStmt):
-                        self.global_names.add(stmt.name)
-                        stmt.mutable = True  # globals must be assignable
-                    self.gen_stmt(stmt)
-                    self.in_global = False
-                    self.indent = 0
-            self.lines[0:0] = prelude_lines()  # insert prelude at top (no hardcoded indices)
-            for s in self.structs:
-                self.gen_struct(s)
-            self.lines.append("")
-            for f in self.functions:
-                self.gen_func_decl(f)
-            self.lines.append("")
-            for e in self.externs:
-                self.gen_extern(e)
-            if self.global_init:
-                self.lines.append("static void bal_init_globals(void) {")
-                self.indent += 1
-                for g in self.global_init:
-                    self.emit(g + ";")
-                self.indent -= 1
-                self.lines.append("}")
-                self.lines.append("")
-            for f in self.functions:
-                self.gen_func(f)
-            if self.tests:
-                for i, t in enumerate(self.tests):
-                    self.lines.append("")
-                    self.lines.append(f"static int bal_test_{i}(void) {{")
-                    self.indent += 1
-                    self.declared_vars = set()
-                    self.array_vars = set()
-                    self.struct_vars = {}
-                    self.nullable_vars = set()
-                    self.in_test = True
-                    for s in t.body:
-                        self.gen_stmt(s)
-                    self.in_test = False
-                    self.emit("return 0;")
-                    self.indent -= 1
-                    self.lines.append("}")
-                self.lines.append("")
-                self.lines.append("static int bal_run_tests(void) {")
-                self.indent += 1
-                self.emit("int fails = 0;")
-                for i, t in enumerate(self.tests):
-                    escaped = t.name.replace("\\", "\\\\").replace('"', '\\"')
-                    self.emit(f'if (bal_test_{i}()) {{ printf("FAIL: {escaped}\\n"); fails++; }} else {{ printf("PASS: {escaped}\\n"); }}')
-                self.emit("return fails;")
-                self.indent -= 1
-                self.lines.append("}")
-                self.lines.append("")
-                self.lines.append("int main(int argc, char** argv) {")
-                self.indent += 1
-                self.emit("int f = bal_run_tests();")
-                self.emit("int r = bal_user_main(argc, argv);")
-                self.emit("return f ? 1 : r;")
-                self.indent -= 1
-                self.lines.append("}")
-            return "\n".join(self.lines)
+        """Generate C for a Program: prelude, structs, decls, globals, funcs, tests."""
+        if not isinstance(node, Program):
+            return ""
+        self._collect_top_level(node)
+        self.lines[0:0] = prelude_lines()
+        self._gen_structs()
+        self._gen_prototypes()
+        self._gen_globals_init()
+        for f in self.functions:
+            self.gen_func(f)
+        if self.tests:
+            self._gen_tests()
+        return "\n".join(self.lines)
 
-        elif isinstance(node, StructDef):
-            self.structs.append(node)
+    def _collect_top_level(self, node):
+        """Sort top-level statements into structs/functions/externs/tests/globals."""
+        for stmt in node.stmts:
+            if isinstance(stmt, StructDef):
+                self.structs.append(stmt)
+            elif isinstance(stmt, FuncDef):
+                self.func_returns[stmt.name] = stmt.ret_type
+                (self.externs if stmt.body == [] else self.functions).append(stmt)
+            elif isinstance(stmt, TestDef):
+                self.tests.append(stmt)
+            else:
+                self.indent = 0
+                self.in_global = True
+                if isinstance(stmt, LetStmt):
+                    self.global_names.add(stmt.name)
+                    stmt.mutable = True
+                self.gen_stmt(stmt)
+                self.in_global = False
+                self.indent = 0
 
-        elif isinstance(node, FuncDef):
-            pass
+    def _gen_structs(self):
+        for s in self.structs:
+            self.gen_struct(s)
+        self.lines.append("")
+
+    def _gen_prototypes(self):
+        for f in self.functions:
+            self.gen_func_decl(f)
+        self.lines.append("")
+        for e in self.externs:
+            self.gen_extern(e)
+
+    def _gen_globals_init(self):
+        if not self.global_init:
+            return
+        self.lines.append("static void bal_init_globals(void) {")
+        self.indent += 1
+        for g in self.global_init:
+            self.emit(g + ";")
+        self.indent -= 1
+        self.lines.append("}")
+        self.lines.append("")
+
+    def _gen_tests(self):
+        """Emit test functions + bal_run_tests + main wrapper."""
+        for i, t in enumerate(self.tests):
+            self.lines.append("")
+            self.lines.append(f"static int bal_test_{i}(void) {{")
+            self.indent += 1
+            self.declared_vars = set()
+            self.array_vars = set()
+            self.struct_vars = {}
+            self.in_test = True
+            for s in t.body:
+                self.gen_stmt(s)
+            self.in_test = False
+            self.emit("return 0;")
+            self.indent -= 1
+            self.lines.append("}")
+        self.lines.append("")
+        self.lines.append("static int bal_run_tests(void) {")
+        self.indent += 1
+        self.emit("int fails = 0;")
+        for i, t in enumerate(self.tests):
+            escaped = t.name.replace("\\", "\\\\").replace('"', '\\"')
+            self.emit(f'if (bal_test_{i}()) {{ printf("FAIL: {escaped}\\n"); fails++; }} else {{ printf("PASS: {escaped}\\n"); }}')
+        self.emit("return fails;")
+        self.indent -= 1
+        self.lines.append("}")
+        self.lines.append("")
+        self.lines.append("int main(int argc, char** argv) {")
+        self.indent += 1
+        self.emit("int f = bal_run_tests();")
+        self.emit("int r = bal_user_main(argc, argv);")
+        self.emit("return f ? 1 : r;")
+        self.indent -= 1
+        self.lines.append("}")
 
     def gen_struct_decl(self, node):
         pass
@@ -168,7 +176,6 @@ class CodeGen:
         self.declared_vars = set(self.global_names)
         self.array_vars = global_arrays  # FIX: was persisting local arrays between functions
         self.struct_vars = {}
-        self.nullable_vars = set()
         fname = "bal_user_main" if (node.name == "main" and self.tests) else node.name
         if node.name == "main":
             ret = "int"
@@ -194,8 +201,6 @@ class CodeGen:
                 self.emit(f"BalArray {name};")
                 continue
             ctype = ctype_of(s.type) if s.type else self.infer_type(s.expr)
-            if s.type and s.type.endswith("?"):
-                self.nullable_vars.add(name)
             self.emit(f"{ctype} {name};")
         for stmt in node.body:
             self.gen_stmt(stmt)
@@ -239,8 +244,6 @@ class CodeGen:
             self.emit(f"{stmt.name} = {init};")
             return
         self.declared_vars.add(stmt.name)
-        if nullable:
-            self.nullable_vars.add(stmt.name)
         if isinstance(stmt.expr, Call) and isinstance(stmt.expr.func, Ident) and stmt.expr.func.name in [s.name for s in self.structs]:
             struct_name = stmt.expr.func.name
             self.struct_vars[stmt.name] = struct_name
