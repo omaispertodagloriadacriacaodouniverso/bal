@@ -112,7 +112,7 @@ class CodeGen:
         self.indent += 1
         self.emit("int fails = 0;")
         for i, t in enumerate(self.tests):
-            escaped = t.name.replace("\\", "\\\\").replace('"', '\\"')
+            escaped = t.name.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
             self.emit(f'if (bal_test_{i}()) {{ printf("FAIL: {escaped}\\n"); fails++; }} else {{ printf("PASS: {escaped}\\n"); }}')
         self.emit("return fails;")
         self.indent -= 1
@@ -254,6 +254,7 @@ class CodeGen:
         """Generate an array literal declaration. Handles global, hoisted, and local cases."""
         elems = stmt.expr.elems
         arr_name = stmt.name
+        already_declared = arr_name in self.declared_vars
         self.array_vars.add(arr_name)
         self.declared_vars.add(arr_name)
 
@@ -264,7 +265,7 @@ class CodeGen:
             for i, e in enumerate(elems):
                 self.global_init.append(f"_{arr_name}_data[{i}] = {self.gen_expr(e)};")
             self.global_init.append(f"{arr_name} = bal_array_new(_{arr_name}_data, {len(elems)});")
-        elif arr_name in self.declared_vars:
+        elif already_declared:
             self.emit(f"_{arr_name}_data = malloc({len(elems)} * sizeof(int));")
             for i, e in enumerate(elems):
                 self.emit(f"_{arr_name}_data[{i}] = {self.gen_expr(e)};")
