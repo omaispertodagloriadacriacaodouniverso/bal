@@ -560,6 +560,10 @@ def main():
     if result is None:
         sys.exit(1)
 
+    if not isinstance(result, tuple) or len(result) != 2:
+        print("Error: unexpected compile_bal return type", file=sys.stderr)
+        sys.exit(1)
+
     exe_path, _c_code = result
     run = subprocess.run([exe_path] + sys.argv[2:], capture_output=False)
     os.unlink(exe_path)
