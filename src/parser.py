@@ -134,6 +134,16 @@ class AssignStmt:
 class ListExpr:
     elems: list
 
+# ── Binary operator precedence (lowest to highest) ──
+
+BINARY_LEVELS = [
+    ("or",),
+    ("and",),
+    ("==", "!=", "<", ">", "<=", ">="),
+    ("+", "-"),
+    ("*", "/", "%"),
+]
+
 # ── Parser ──
 
 class Parser:
@@ -222,16 +232,14 @@ class Parser:
             return None
         raise SyntaxError(f"Unexpected token {tok} at line {tok.line}")
 
-    def parse_func(self):
-        self.expect(TT_KEYWORD, "fn")
-        name = self.expect(TT_IDENT).value
+    def _parse_signature(self):
+        """Parse (params) -> ret_type. Shared by parse_func and parse_extern."""
         self.expect(TT_LPAREN)
         params = []
         while self.peek().type != TT_RPAREN:
             pname = self.expect(TT_IDENT).value
             self.expect(TT_COLON)
-            ptype = self.parse_type()
-            params.append(Param(pname, ptype))
+            params.append(Param(pname, self.parse_type()))
             if self.peek().type == TT_COMMA:
                 self.advance()
         self.expect(TT_RPAREN)
@@ -239,10 +247,20 @@ class Parser:
         if self.peek().type == TT_ARROW:
             self.advance()
             ret_type = self.parse_type()
+        return params, ret_type
+
+    def _parse_block_after_colon(self):
+        """Parse `: <newline> INDENT block`. Used by fn/if/elif/else/while/for/test/struct."""
         self.expect(TT_COLON)
         self.skip_newlines()
         self.expect(TT_INDENT)
-        body = self.parse_block()
+        return self.parse_block()
+
+    def parse_func(self):
+        self.expect(TT_KEYWORD, "fn")
+        name = self.expect(TT_IDENT).value
+        params, ret_type = self._parse_signature()
+        body = self._parse_block_after_colon()
         return FuncDef(name, params, ret_type, body)
 
     def parse_struct(self):
@@ -258,8 +276,7 @@ class Parser:
                 break
             fname = self.expect(TT_IDENT).value
             self.expect(TT_COLON)
-            ftype = self.parse_type()
-            fields.append((fname, ftype))
+            fields.append((fname, self.parse_type()))
             self.skip_newlines()
         if self.peek().type == TT_DEDENT:
             self.advance()
@@ -280,38 +297,25 @@ class Parser:
     def parse_if(self):
         self.expect(TT_KEYWORD, "if")
         cond = self.parse_expr()
-        self.expect(TT_COLON)
-        self.skip_newlines()
-        self.expect(TT_INDENT)
-        body = self.parse_block()
+        body = self._parse_block_after_colon()
         elifs = []
         else_body = None
-        # Handle elif/else
         while self.peek().type == TT_KEYWORD and self.peek().value in ("elif", "else"):
             if self.peek().value == "elif":
                 self.advance()
                 elif_cond = self.parse_expr()
-                self.expect(TT_COLON)
-                self.skip_newlines()
-                self.expect(TT_INDENT)
-                elif_body = self.parse_block()
+                elif_body = self._parse_block_after_colon()
                 elifs.append((elif_cond, elif_body))
             else:
                 self.advance()
-                self.expect(TT_COLON)
-                self.skip_newlines()
-                self.expect(TT_INDENT)
-                else_body = self.parse_block()
+                else_body = self._parse_block_after_colon()
                 break
         return IfStmt(cond, body, elifs, else_body)
 
     def parse_while(self):
         self.expect(TT_KEYWORD, "while")
         cond = self.parse_expr()
-        self.expect(TT_COLON)
-        self.skip_newlines()
-        self.expect(TT_INDENT)
-        body = self.parse_block()
+        body = self._parse_block_after_colon()
         return WhileStmt(cond, body)
 
     def parse_for(self):
@@ -319,39 +323,20 @@ class Parser:
         var = self.expect(TT_IDENT).value
         self.expect(TT_KEYWORD, "in")
         iterable = self.parse_expr()
-        self.expect(TT_COLON)
-        self.skip_newlines()
-        self.expect(TT_INDENT)
-        body = self.parse_block()
+        body = self._parse_block_after_colon()
         return ForStmt(var, iterable, body)
 
     def parse_test(self):
         self.expect(TT_KEYWORD, "test")
         name = self.expect(TT_STR).value
-        self.expect(TT_COLON)
-        self.skip_newlines()
-        self.expect(TT_INDENT)
-        body = self.parse_block()
+        body = self._parse_block_after_colon()
         return TestDef(name, body)
 
     def parse_extern(self):
         self.expect(TT_KEYWORD, "extern")
         self.expect(TT_KEYWORD, "fn")
         name = self.expect(TT_IDENT).value
-        self.expect(TT_LPAREN)
-        params = []
-        while self.peek().type != TT_RPAREN:
-            pname = self.expect(TT_IDENT).value
-            self.expect(TT_COLON)
-            ptype = self.parse_type()
-            params.append(Param(pname, ptype))
-            if self.peek().type == TT_COMMA:
-                self.advance()
-        self.expect(TT_RPAREN)
-        ret_type = "void"
-        if self.peek().type == TT_ARROW:
-            self.advance()
-            ret_type = self.parse_type()
+        params, ret_type = self._parse_signature()
         return FuncDef(name, params, ret_type, [])
 
     def parse_type(self):
@@ -391,58 +376,34 @@ class Parser:
         return stmts
 
     def parse_expr(self):
-        return self.parse_or()
+        return self._parse_binary(0)
 
-    def parse_or(self):
-        left = self.parse_and()
-        while self.peek().type == TT_KEYWORD and self.peek().value == "or":
-            self.advance()
-            right = self.parse_and()
-            left = BinOp(left, "or", right)
+    # Precedence levels, lowest to highest. Keyword ops checked via TT_KEYWORD,
+    # symbol ops via TT_OP.
+
+    def _parse_binary(self, level):
+        if level >= len(BINARY_LEVELS):
+            return self._parse_unary_level()
+        ops = BINARY_LEVELS[level]
+        left = self._parse_binary(level + 1)
+        while self._peek_op(ops):
+            op = self.advance().value
+            left = BinOp(left, op, self._parse_binary(level + 1))
         return left
 
-    def parse_and(self):
-        left = self.parse_not()
-        while self.peek().type == TT_KEYWORD and self.peek().value == "and":
-            self.advance()
-            right = self.parse_not()
-            left = BinOp(left, "and", right)
-        return left
+    def _peek_op(self, ops):
+        tok = self.peek()
+        if tok.value in ops:
+            return tok.type == TT_KEYWORD or tok.type == TT_OP
+        return False
 
-    def parse_not(self):
+    def _parse_unary_level(self):
         if self.peek().type == TT_KEYWORD and self.peek().value == "not":
             self.advance()
-            return UnaryOp("not", self.parse_not())
-        return self.parse_cmp()
-
-    def parse_cmp(self):
-        left = self.parse_add()
-        while self.peek().type == TT_OP and self.peek().value in ("==", "!=", "<", ">", "<=", ">="):
-            op = self.advance().value
-            right = self.parse_add()
-            left = BinOp(left, op, right)
-        return left
-
-    def parse_add(self):
-        left = self.parse_mul()
-        while self.peek().type == TT_OP and self.peek().value in ("+", "-"):
-            op = self.advance().value
-            right = self.parse_mul()
-            left = BinOp(left, op, right)
-        return left
-
-    def parse_mul(self):
-        left = self.parse_unary()
-        while self.peek().type == TT_OP and self.peek().value in ("*", "/", "%"):
-            op = self.advance().value
-            right = self.parse_unary()
-            left = BinOp(left, op, right)
-        return left
-
-    def parse_unary(self):
+            return UnaryOp("not", self._parse_unary_level())
         if self.peek().type == TT_OP and self.peek().value in ("-", "+"):
             op = self.advance().value
-            return UnaryOp(op, self.parse_unary())
+            return UnaryOp(op, self._parse_unary_level())
         return self.parse_postfix()
 
     def parse_postfix(self):
