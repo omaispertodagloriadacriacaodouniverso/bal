@@ -78,7 +78,7 @@ class Lexer:
 
         while len(self.indent_stack) > 1:
             self.indent_stack.pop()
-            self.tokens.append(Token(TT_DEDENT, 0, len(self.lines), 0))
+            self.tokens.append(Token(TT_DEDENT, "", len(self.lines), 0))
 
         self.tokens.append(Token(TT_EOF, None, len(self.lines), 0))
         return self.tokens
@@ -119,7 +119,8 @@ class Lexer:
                 while j < len(text) and text[j] != quote:
                     j += 2 if text[j] == "\\" and j + 1 < len(text) else 1
                 raw = text[i + 1:j]
-                val = raw.encode().decode("unicode_escape")
+                # Handle escape sequences while preserving UTF-8
+                val = raw.encode("latin-1").decode("unicode_escape").encode("utf-8").decode("utf-8")
                 self.tokens.append(Token(TT_STR, val, line_num, base_col + i))
                 i = j + 1
                 continue
