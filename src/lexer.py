@@ -22,16 +22,47 @@ TT_RBRACKET = "RBRACKET"
 TT_ARROW = "ARROW"
 
 KEYWORDS = {
-    "fn", "let", "var", "const", "if", "elif", "else", "while", "for",
-    "in", "return", "struct", "match", "extern", "print", "import",
-    "and", "or", "not", "true", "false", "None",    "int", "float", "bool", "str", "void",
-    "test", "assert",
+    "fn",
+    "let",
+    "var",
+    "const",
+    "if",
+    "elif",
+    "else",
+    "while",
+    "for",
+    "in",
+    "return",
+    "struct",
+    "match",
+    "extern",
+    "print",
+    "import",
+    "and",
+    "or",
+    "not",
+    "true",
+    "false",
+    "None",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "void",
+    "test",
+    "assert",
 }
 
 # Single-char punctuation -> token type
 PUNCT = {
-    ":": TT_COLON, ",": TT_COMMA, ".": TT_DOT, "?": TT_QUESTION,
-    "(": TT_LPAREN, ")": TT_RPAREN, "[": TT_LBRACKET, "]": TT_RBRACKET,
+    ":": TT_COLON,
+    ",": TT_COMMA,
+    ".": TT_DOT,
+    "?": TT_QUESTION,
+    "(": TT_LPAREN,
+    ")": TT_RPAREN,
+    "[": TT_LBRACKET,
+    "]": TT_RBRACKET,
 }
 
 
@@ -118,14 +149,25 @@ class Lexer:
                 j = i + 1
                 while j < len(text) and text[j] != quote:
                     j += 2 if text[j] == "\\" and j + 1 < len(text) else 1
-                raw = text[i + 1:j]
+                if j >= len(text):
+                    raise SyntaxError(
+                        f"Unterminated string literal at line {line_num}, col {base_col + i}"
+                    )
+                raw = text[i + 1 : j]
                 # Handle escape sequences while preserving UTF-8
-                val = raw.encode("latin-1").decode("unicode_escape").encode("utf-8").decode("utf-8")
+                val = (
+                    raw.encode("latin-1")
+                    .decode("unicode_escape")
+                    .encode("utf-8")
+                    .decode("utf-8")
+                )
                 self.tokens.append(Token(TT_STR, val, line_num, base_col + i))
                 i = j + 1
                 continue
 
-            if ch.isdigit() or (ch == "." and i + 1 < len(text) and text[i + 1].isdigit()):
+            if ch.isdigit() or (
+                ch == "." and i + 1 < len(text) and text[i + 1].isdigit()
+            ):
                 j = i
                 is_float = False
                 while j < len(text) and (text[j].isdigit() or text[j] == "."):
@@ -138,19 +180,23 @@ class Lexer:
                     num_val = float(val) if is_float else int(val)
                 except ValueError:
                     # Invalid number format (e.g., "1.2.3") - report precise error
-                    raise SyntaxError(f"Invalid number format: {val!r} at line {line_num}, col {base_col + i}")
+                    raise SyntaxError(
+                        f"Invalid number format: {val!r} at line {line_num}, col {base_col + i}"
+                    )
                 self.tokens.append(Token(ttype, num_val, line_num, base_col + i))
                 i = j
                 continue
 
-            if text[i:i + 2] == "->":
+            if text[i : i + 2] == "->":
                 self.tokens.append(Token(TT_ARROW, "->", line_num, base_col + i))
                 i += 2
                 continue
 
             if ch in "+-*/%<>!=":
                 if i + 1 < len(text) and text[i + 1] == "=":
-                    self.tokens.append(Token(TT_OP, text[i:i + 2], line_num, base_col + i))
+                    self.tokens.append(
+                        Token(TT_OP, text[i : i + 2], line_num, base_col + i)
+                    )
                     i += 2
                 else:
                     self.tokens.append(Token(TT_OP, ch, line_num, base_col + i))

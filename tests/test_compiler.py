@@ -76,10 +76,25 @@ def test_string_with_hash():
     no_comment = not any(isinstance(t.value, str) and "comment" in t.value for t in toks2)
     check("comment outside string stripped", no_comment)
 
+def test_unterminated_string():
+    """A string literal without its closing quote must raise, not tokenize."""
+    from lexer import tokenize
+    for src in ['x = "unclosed', "x = 'unclosed"]:
+        try:
+            tokenize(src)
+        except SyntaxError:
+            check(f"unterminated string rejected: {src}", True)
+        else:
+            check(f"unterminated string rejected: {src}", False)
+
+    toks = tokenize('x = "closed"')
+    check("terminated string still tokenizes", any(t.value == "closed" for t in toks))
+
 if __name__ == "__main__":
     test_codegen_basic()
     test_arena_fix()
     test_compile_and_run()
     test_string_with_hash()
+    test_unterminated_string()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
