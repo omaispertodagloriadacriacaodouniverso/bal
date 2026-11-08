@@ -134,7 +134,12 @@ class Lexer:
                     j += 1
                 val = text[i:j]
                 ttype = TT_FLOAT if is_float else TT_INT
-                self.tokens.append(Token(ttype, float(val) if is_float else int(val), line_num, base_col + i))
+                try:
+                    num_val = float(val) if is_float else int(val)
+                except ValueError:
+                    # Invalid number format (e.g., "1.2.3") - report precise error
+                    raise SyntaxError(f"Invalid number format: {val!r} at line {line_num}, col {base_col + i}")
+                self.tokens.append(Token(ttype, num_val, line_num, base_col + i))
                 i = j
                 continue
 
